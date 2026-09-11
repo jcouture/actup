@@ -18,20 +18,45 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-package main
+package cmd
 
 import (
 	"fmt"
-	"os"
 
-	"github.com/jcouture/actup/cmd"
+	"github.com/jcouture/actup/internal/discover"
+	"github.com/spf13/cobra"
 )
 
-var Version = "dev"
+// Execute runs the actup root command with the supplied build version.
+func Execute(version string) error {
+	command := &cobra.Command{
+		Use:           "actup",
+		Short:         "Find GitHub Actions files in a Git repository",
+		Args:          cobra.NoArgs,
+		Version:       version,
+		SilenceErrors: true,
+		SilenceUsage:  true,
+		RunE: func(command *cobra.Command, _ []string) error {
+			root, err := discover.RepositoryRoot()
+			if err != nil {
+				return err
+			}
 
-func main() {
-	if err := cmd.Execute(Version); err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		os.Exit(1)
+			files, err := discover.Files(root)
+			if err != nil {
+				return err
+			}
+			if len(files) == 0 {
+				fmt.Fprintln(command.OutOrStdout(), "No GitHub Actions files found.")
+				return nil
+			}
+
+			for _, file := range files {
+				fmt.Fprintln(command.OutOrStdout(), file)
+			}
+			return nil
+		},
 	}
+
+	return command.Execute()
 }
