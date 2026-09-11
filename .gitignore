@@ -25,8 +25,9 @@ go.work.sum
 # Build cache
 .gocache/
 
-# env file
+# env files
 .env
+.env.local
 
 # Editor/IDE
 # .idea/
