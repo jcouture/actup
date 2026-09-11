@@ -24,8 +24,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/jcouture/actup/internal/action"
+	"github.com/jcouture/actup/internal/config"
 	"github.com/jcouture/actup/internal/discover"
 	"github.com/spf13/cobra"
 )
@@ -36,6 +38,7 @@ func Execute(version string) error {
 }
 
 func newRootCommand(version string) *cobra.Command {
+	var configPath string
 	command := &cobra.Command{
 		Use:           "actup",
 		Short:         "Find external actions used in a Git repository",
@@ -44,7 +47,14 @@ func newRootCommand(version string) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if command.Flags().Changed("config") && configPath == "" {
+				return fmt.Errorf("--config requires a non-empty path")
+			}
 			root, err := discover.RepositoryRoot()
+			if err != nil {
+				return err
+			}
+			configuration, err := config.Load(root, configPath)
 			if err != nil {
 				return err
 			}
@@ -53,6 +63,8 @@ func newRootCommand(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			fmt.Fprintf(command.OutOrStdout(), "min-release-age: %s\n\n", formatDuration(configuration.MinReleaseAge))
+
 			printed := false
 			for _, file := range files {
 				contents, err := os.OpenInRoot(root, filepath.FromSlash(file))
@@ -86,6 +98,17 @@ func newRootCommand(version string) *cobra.Command {
 			return nil
 		},
 	}
+	command.Flags().StringVar(&configPath, "config", "", "path to configuration file")
 
 	return command
+}
+
+func formatDuration(duration time.Duration) string {
+	if duration%time.Hour == 0 {
+		return fmt.Sprintf("%dh", duration/time.Hour)
+	}
+	if duration%time.Minute == 0 {
+		return fmt.Sprintf("%dm", duration/time.Minute)
+	}
+	return fmt.Sprintf("%ds", duration/time.Second)
 }

@@ -42,7 +42,8 @@ func TestRootCommandPrintsReferencesGroupedByFile(t *testing.T) {
 `)
 
 	got := executeIn(t, root)
-	want := ".github/workflows/ci.yml\n" +
+	want := "min-release-age: 24h\n\n" +
+		".github/workflows/ci.yml\n" +
 		"  actions/checkout@v4\n" +
 		"  actions/setup-go@v5\n\n" +
 		".github/workflows/release.yml\n" +
@@ -56,8 +57,45 @@ func TestRootCommandWithoutReferences(t *testing.T) {
 	root := repository(t)
 	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: docker://alpine:latest\n")
 
-	if got, want := executeIn(t, root), "All GitHub Actions are current.\n"; got != want {
+	if got, want := executeIn(t, root), "min-release-age: 24h\n\nAll GitHub Actions are current.\n"; got != want {
 		t.Errorf("output = %q, want %q", got, want)
+	}
+}
+
+func TestRootCommandLoadsConfiguration(t *testing.T) {
+	root := repository(t)
+	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("min-release-age = \"3d\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	if got, want := executeIn(t, root), "min-release-age: 72h\n\nAll GitHub Actions are current.\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+}
+
+func TestRootCommandConfigFlagOverridesDefault(t *testing.T) {
+	root := repository(t)
+	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("min-release-age = \"3d\"\n"), 0o644); err != nil {
+		t.Fatalf("write default config: %v", err)
+	}
+	explicit := filepath.Join(root, "other.toml")
+	if err := os.WriteFile(explicit, []byte("min-release-age = \"30m\"\n"), 0o644); err != nil {
+		t.Fatalf("write explicit config: %v", err)
+	}
+
+	got, err := executeArgsIn(t, root, "--config", explicit)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if want := "min-release-age: 30m\n\nAll GitHub Actions are current.\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+}
+
+func TestRootCommandMissingExplicitConfigFails(t *testing.T) {
+	root := repository(t)
+	if _, err := executeArgsIn(t, root, "--config", filepath.Join(root, "missing.toml")); err == nil {
+		t.Fatal("Execute() error = nil, want error")
 	}
 }
 
@@ -83,13 +121,20 @@ func writeWorkflow(t *testing.T, root, name, contents string) {
 
 func executeIn(t *testing.T, root string) string {
 	t.Helper()
+	output, err := executeArgsIn(t, root)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	return output
+}
+
+func executeArgsIn(t *testing.T, root string, args ...string) (string, error) {
+	t.Helper()
 	t.Chdir(root)
 	var output bytes.Buffer
 	command := newRootCommand("test")
-	command.SetArgs([]string{})
+	command.SetArgs(args)
 	command.SetOut(&output)
-	if err := command.Execute(); err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	return output.String()
+	err := command.Execute()
+	return output.String(), err
 }
