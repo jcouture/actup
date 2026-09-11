@@ -21,20 +21,24 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
-	"time"
 
 	"github.com/jcouture/actup/internal/action"
 	"github.com/jcouture/actup/internal/config"
 	"github.com/jcouture/actup/internal/discover"
+	githubapi "github.com/jcouture/actup/internal/github"
+	"github.com/jcouture/actup/internal/resolver"
 	"github.com/spf13/cobra"
 )
 
+var githubAPIURL = "https://api.github.com"
+
 // Execute runs the actup root command with the supplied build version.
 func Execute(version string) error {
-	return newRootCommand(version).Execute()
+	return newRootCommand(version).ExecuteContext(context.Background())
 }
 
 func newRootCommand(version string) *cobra.Command {
@@ -47,6 +51,8 @@ func newRootCommand(version string) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(command *cobra.Command, _ []string) error {
+			ctx, cancel := context.WithCancel(command.Context())
+			defer cancel()
 			if command.Flags().Changed("config") && configPath == "" {
 				return fmt.Errorf("--config requires a non-empty path")
 			}
@@ -63,9 +69,8 @@ func newRootCommand(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			fmt.Fprintf(command.OutOrStdout(), "min-release-age: %s\n\n", formatDuration(configuration.MinReleaseAge))
 
-			printed := false
+			var occurrences []resolver.Occurrence
 			for _, file := range files {
 				contents, err := os.OpenInRoot(root, filepath.FromSlash(file))
 				if err != nil {
@@ -79,20 +84,20 @@ func newRootCommand(version string) *cobra.Command {
 				if closeErr != nil {
 					return fmt.Errorf("close %q: %w", file, closeErr)
 				}
-				if len(uses) == 0 {
-					continue
-				}
-
-				if printed {
-					fmt.Fprintln(command.OutOrStdout())
-				}
-				fmt.Fprintln(command.OutOrStdout(), file)
 				for _, use := range uses {
-					fmt.Fprintf(command.OutOrStdout(), "  %s\n", use.Reference)
+					occurrences = append(occurrences, resolver.Occurrence{File: file, Use: use})
 				}
-				printed = true
 			}
-			if !printed {
+
+			apiClient := githubapi.NewClient(githubapi.ClientConfig{
+				BaseURL: githubAPIURL,
+				Token:   os.Getenv("GITHUB_TOKEN"),
+			})
+			results, err := resolver.New(apiClient).Resolve(ctx, occurrences, configuration.MinReleaseAge)
+			if err != nil {
+				return err
+			}
+			if !printResults(command, results) {
 				fmt.Fprintln(command.OutOrStdout(), "All GitHub Actions are current.")
 			}
 			return nil
@@ -103,12 +108,29 @@ func newRootCommand(version string) *cobra.Command {
 	return command
 }
 
-func formatDuration(duration time.Duration) string {
-	if duration%time.Hour == 0 {
-		return fmt.Sprintf("%dh", duration/time.Hour)
+func printResults(command *cobra.Command, results []resolver.Result) bool {
+	printed := false
+	currentFile := ""
+	for _, result := range results {
+		if !result.Changed {
+			continue
+		}
+		if result.Occurrence.File != currentFile {
+			if printed {
+				fmt.Fprintln(command.OutOrStdout())
+			}
+			fmt.Fprintln(command.OutOrStdout(), result.Occurrence.File)
+			fmt.Fprintln(command.OutOrStdout())
+			currentFile = result.Occurrence.File
+		} else {
+			fmt.Fprintln(command.OutOrStdout())
+		}
+		fmt.Fprintf(command.OutOrStdout(), "  UPDATE  %s\n", result.Occurrence.Use.Reference.RepositoryID())
+		fmt.Fprintf(command.OutOrStdout(), "          %s -> %s\n", result.Current, result.Target.Tag)
+		if result.MajorChange {
+			fmt.Fprintln(command.OutOrStdout(), "          warning: major version change")
+		}
+		printed = true
 	}
-	if duration%time.Minute == 0 {
-		return fmt.Sprintf("%dm", duration/time.Minute)
-	}
-	return fmt.Sprintf("%ds", duration/time.Second)
+	return printed
 }

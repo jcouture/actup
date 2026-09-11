@@ -22,12 +22,38 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestRootCommandPrintsReferencesGroupedByFile(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		tags := map[string]string{
+			"actions/checkout":             "v5.0.0",
+			"actions/setup-go":             "v6.1.0",
+			"goreleaser/goreleaser-action": "v7.0.0",
+		}
+		for repository, tag := range tags {
+			switch request.URL.Path {
+			case "/repos/" + repository + "/releases":
+				fmt.Fprintf(response, `[{"tag_name":%q,"published_at":"2020-01-01T00:00:00Z"}]`, tag)
+				return
+			case "/repos/" + repository + "/git/ref/tags/" + tag:
+				fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+				return
+			}
+		}
+		http.NotFound(response, request)
+	}))
+	defer server.Close()
+	oldAPIURL := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = oldAPIURL })
+
 	root := repository(t)
 	writeWorkflow(t, root, ".github/workflows/ci.yml", `jobs:
   test:
@@ -42,12 +68,17 @@ func TestRootCommandPrintsReferencesGroupedByFile(t *testing.T) {
 `)
 
 	got := executeIn(t, root)
-	want := "min-release-age: 24h\n\n" +
-		".github/workflows/ci.yml\n" +
-		"  actions/checkout@v4\n" +
-		"  actions/setup-go@v5\n\n" +
-		".github/workflows/release.yml\n" +
-		"  goreleaser/goreleaser-action@v6.3.0\n"
+	want := ".github/workflows/ci.yml\n\n" +
+		"  UPDATE  actions/checkout\n" +
+		"          v4 -> v5.0.0\n" +
+		"          warning: major version change\n\n" +
+		"  UPDATE  actions/setup-go\n" +
+		"          v5 -> v6.1.0\n" +
+		"          warning: major version change\n\n" +
+		".github/workflows/release.yml\n\n" +
+		"  UPDATE  goreleaser/goreleaser-action\n" +
+		"          v6.3.0 -> v7.0.0\n" +
+		"          warning: major version change\n"
 	if got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}
@@ -57,7 +88,7 @@ func TestRootCommandWithoutReferences(t *testing.T) {
 	root := repository(t)
 	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: docker://alpine:latest\n")
 
-	if got, want := executeIn(t, root), "min-release-age: 24h\n\nAll GitHub Actions are current.\n"; got != want {
+	if got, want := executeIn(t, root), "All GitHub Actions are current.\n"; got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}
 }
@@ -68,7 +99,7 @@ func TestRootCommandLoadsConfiguration(t *testing.T) {
 		t.Fatalf("write config: %v", err)
 	}
 
-	if got, want := executeIn(t, root), "min-release-age: 72h\n\nAll GitHub Actions are current.\n"; got != want {
+	if got, want := executeIn(t, root), "All GitHub Actions are current.\n"; got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}
 }
@@ -87,7 +118,7 @@ func TestRootCommandConfigFlagOverridesDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Execute() error = %v", err)
 	}
-	if want := "min-release-age: 30m\n\nAll GitHub Actions are current.\n"; got != want {
+	if want := "All GitHub Actions are current.\n"; got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}
 }
