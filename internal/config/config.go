@@ -26,6 +26,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	pathpkg "path"
 	"path/filepath"
 	"strconv"
 	"time"
@@ -38,10 +39,12 @@ const defaultMinReleaseAge = "24h"
 // Config is the effective actup configuration.
 type Config struct {
 	MinReleaseAge time.Duration
+	Ignore        []string
 }
 
 type fileConfig struct {
-	MinReleaseAge string `toml:"min-release-age"`
+	MinReleaseAge string   `toml:"min-release-age"`
+	Ignore        []string `toml:"ignore"`
 }
 
 // Load reads the explicit configuration path, or .actup.toml under root when
@@ -72,16 +75,21 @@ func Load(root, path string) (Config, error) {
 	if err := toml.NewDecoder(file).DisallowUnknownFields().Decode(&decoded); err != nil {
 		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
+	for index, pattern := range decoded.Ignore {
+		if _, err := pathpkg.Match(pattern, ""); err != nil {
+			return Config{}, fmt.Errorf("parse config %q: ignore[%d]: %w", path, index, err)
+		}
+	}
 
 	minimumAge, err := parseDuration(decoded.MinReleaseAge)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse config %q: min-release-age: %w", path, err)
 	}
-	return Config{MinReleaseAge: minimumAge}, nil
+	return Config{MinReleaseAge: minimumAge, Ignore: decoded.Ignore}, nil
 }
 
 func defaults() Config {
-	return Config{MinReleaseAge: 24 * time.Hour}
+	return Config{MinReleaseAge: 24 * time.Hour, Ignore: nil}
 }
 
 func parseDuration(value string) (time.Duration, error) {

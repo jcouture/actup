@@ -27,6 +27,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 
 	"github.com/jcouture/actup/internal/action"
@@ -69,6 +70,7 @@ func newRootCommand(version string) *cobra.Command {
 	var configPath string
 	var dryRun bool
 	var check bool
+	var ignorePatterns []string
 	command := &cobra.Command{
 		Use:           "actup",
 		Short:         "Pin GitHub Actions to current immutable commit SHAs",
@@ -93,6 +95,12 @@ func newRootCommand(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			for index, pattern := range ignorePatterns {
+				if _, err := path.Match(pattern, ""); err != nil {
+					return fmt.Errorf("--ignore[%d]: %w", index, err)
+				}
+			}
+			configuration.Ignore = append(configuration.Ignore, ignorePatterns...)
 
 			files, err := discover.Files(root)
 			if err != nil {
@@ -122,6 +130,10 @@ func newRootCommand(version string) *cobra.Command {
 				for _, use := range uses {
 					occurrences = append(occurrences, resolver.Occurrence{File: file, Use: use})
 				}
+			}
+			occurrences, err = filterIgnored(occurrences, configuration.Ignore)
+			if err != nil {
+				return err
 			}
 
 			apiClient := githubapi.NewClient(githubapi.ClientConfig{
@@ -169,8 +181,35 @@ func newRootCommand(version string) *cobra.Command {
 	command.Flags().StringVar(&configPath, "config", "", "path to configuration file")
 	command.Flags().BoolVar(&dryRun, "dry-run", false, "print updates without writing files")
 	command.Flags().BoolVar(&check, "check", false, "exit 1 when updates are available")
+	command.Flags().StringArrayVar(&ignorePatterns, "ignore", nil, "action pattern to exclude (may be repeated)")
 
 	return command
+}
+
+func filterIgnored(occurrences []resolver.Occurrence, patterns []string) ([]resolver.Occurrence, error) {
+	for _, pattern := range patterns {
+		if _, err := path.Match(pattern, ""); err != nil {
+			return nil, fmt.Errorf("ignore pattern %q: %w", pattern, err)
+		}
+	}
+	filtered := make([]resolver.Occurrence, 0, len(occurrences))
+	for _, occurrence := range occurrences {
+		ignored := false
+		for _, pattern := range patterns {
+			matches, err := path.Match(pattern, occurrence.Use.Reference.RepositoryID())
+			if err != nil {
+				return nil, fmt.Errorf("ignore pattern %q: %w", pattern, err)
+			}
+			if matches {
+				ignored = true
+				break
+			}
+		}
+		if !ignored {
+			filtered = append(filtered, occurrence)
+		}
+	}
+	return filtered, nil
 }
 
 func resultsForFile(results []resolver.Result, file string) []resolver.Result {

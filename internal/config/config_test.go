@@ -69,6 +69,47 @@ func TestLoadInvalidDurations(t *testing.T) {
 	}
 }
 
+func TestLoadIgnorePatterns(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents string
+		want     []string
+	}{
+		{name: "single", contents: "ignore = [\"actions/*\"]\n", want: []string{"actions/*"}},
+		{name: "multiple", contents: "ignore = [\"actions/*\", \"myorg/internal-*\"]\n", want: []string{"actions/*", "myorg/internal-*"}},
+		{name: "empty", contents: "ignore = []\n", want: []string{}},
+		{name: "glob characters", contents: "ignore = [\"owner/repo?\", \"github/[ac]*\"]\n", want: []string{"owner/repo?", "github/[ac]*"}},
+		{name: "absent", contents: "min-release-age = \"24h\"\n", want: nil},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := writeConfig(t, root, "config.toml", test.contents)
+			got, err := Load(root, path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if len(got.Ignore) != len(test.want) {
+				t.Fatalf("Ignore = %v, want %v", got.Ignore, test.want)
+			}
+			for index := range test.want {
+				if got.Ignore[index] != test.want[index] {
+					t.Errorf("Ignore[%d] = %q, want %q", index, got.Ignore[index], test.want[index])
+				}
+			}
+		})
+	}
+}
+
+func TestLoadInvalidIgnorePattern(t *testing.T) {
+	root := t.TempDir()
+	path := writeConfig(t, root, "config.toml", "ignore = [\"actions/[invalid\"]\n")
+	if _, err := Load(root, path); err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+}
+
 func TestLoadFileBehavior(t *testing.T) {
 	t.Run("missing default", func(t *testing.T) {
 		got, err := Load(t.TempDir(), "")

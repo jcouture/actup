@@ -200,6 +200,133 @@ func TestRootCommandMissingExplicitConfigFails(t *testing.T) {
 	}
 }
 
+func TestRootCommandIgnoresActionsFromFlagAndConfig(t *testing.T) {
+	requests := make(chan string, 10)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		requests <- request.URL.Path
+		switch request.URL.Path {
+		case "/repos/goreleaser/goreleaser-action/releases":
+			fmt.Fprint(response, `[{"tag_name":"v7.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+		case "/repos/goreleaser/goreleaser-action/git/ref/tags/v7.0.0":
+			fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	oldAPIURL := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = oldAPIURL })
+
+	root := repository(t)
+	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("ignore = [\"actions/checkout\"]\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	original := "steps:\n" +
+		"  - uses: actions/checkout@v4\n" +
+		"  - uses: github/codeql-action/analyze@v3\n" +
+		"  - uses: goreleaser/goreleaser-action@v6.3.0\n"
+	writeWorkflow(t, root, ".github/workflows/ci.yml", original)
+
+	got, err := executeArgsIn(t, root, "--ignore", "github/*")
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	want := ".github/workflows/ci.yml\n\n" +
+		"  UPDATE  goreleaser/goreleaser-action\n" +
+		"          v6.3.0 -> v7.0.0\n" +
+		"          warning: major version change\n\n" +
+		"Updated 1 reference in 1 file.\n" +
+		"1 major version update.\n"
+	if got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	wantFile := "steps:\n" +
+		"  - uses: actions/checkout@v4\n" +
+		"  - uses: github/codeql-action/analyze@v3\n" +
+		"  - uses: goreleaser/goreleaser-action@0123456789abcdef0123456789abcdef01234567 # v7.0.0\n"
+	if string(contents) != wantFile {
+		t.Errorf("workflow = %q, want %q", contents, wantFile)
+	}
+	close(requests)
+	for request := range requests {
+		if request != "/repos/goreleaser/goreleaser-action/releases" &&
+			request != "/repos/goreleaser/goreleaser-action/git/ref/tags/v7.0.0" {
+			t.Errorf("unexpected API request %q", request)
+		}
+	}
+}
+
+func TestRootCommandIgnoreInReadOnlyModes(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		flag      string
+		wantError bool
+		summary   string
+	}{
+		{name: "dry run", flag: "--dry-run", summary: "1 reference would be updated in 1 file.\n"},
+		{name: "check", flag: "--check", wantError: true, summary: "1 reference requires updates in 1 file.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+				switch request.URL.Path {
+				case "/repos/goreleaser/goreleaser-action/releases":
+					fmt.Fprint(response, `[{"tag_name":"v7.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+				case "/repos/goreleaser/goreleaser-action/git/ref/tags/v7.0.0":
+					fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+				default:
+					http.NotFound(response, request)
+				}
+			}))
+			defer server.Close()
+			oldAPIURL := githubAPIURL
+			githubAPIURL = server.URL
+			t.Cleanup(func() { githubAPIURL = oldAPIURL })
+
+			root := repository(t)
+			original := "steps:\n" +
+				"  - uses: actions/checkout@v4\n" +
+				"  - uses: goreleaser/goreleaser-action@v6.3.0\n"
+			writeWorkflow(t, root, ".github/workflows/ci.yml", original)
+			got, err := executeArgsIn(t, root, test.flag, "--ignore", "actions/*")
+			if (err != nil) != test.wantError {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if test.wantError && !IsCheckFailure(err) {
+				t.Fatalf("error = %v, want check failure", err)
+			}
+			if !bytes.Contains([]byte(got), []byte(test.summary)) {
+				t.Errorf("output = %q, want to contain %q", got, test.summary)
+			}
+			if bytes.Contains([]byte(got), []byte("actions/checkout")) {
+				t.Errorf("output = %q, want ignored action omitted", got)
+			}
+			contents, readErr := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
+			if readErr != nil || string(contents) != original {
+				t.Errorf("workflow = %q, %v; want unchanged", contents, readErr)
+			}
+		})
+	}
+}
+
+func TestRootCommandRejectsInvalidIgnorePattern(t *testing.T) {
+	root := repository(t)
+	_, err := executeArgsIn(t, root, "--ignore", "actions/[invalid")
+	if err == nil {
+		t.Fatal("Execute() error = nil, want error")
+	}
+}
+
+func TestFilterIgnoredRejectsInvalidPatternWithoutOccurrences(t *testing.T) {
+	if _, err := filterIgnored(nil, []string{"actions/[invalid"}); err == nil {
+		t.Fatal("filterIgnored() error = nil, want error")
+	}
+}
+
 func repository(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
