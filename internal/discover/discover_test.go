@@ -72,6 +72,22 @@ func TestRepositoryRootNotFound(t *testing.T) {
 	}
 }
 
+func TestRepositoryRootFromRejectsInvalidScanPath(t *testing.T) {
+	t.Run("missing", func(t *testing.T) {
+		if _, err := RepositoryRootFrom(filepath.Join(t.TempDir(), "missing")); err == nil {
+			t.Fatal("RepositoryRootFrom() error = nil, want error")
+		}
+	})
+
+	t.Run("file", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "workflow.yml")
+		writeFile(t, file)
+		if _, err := RepositoryRootFrom(file); err == nil {
+			t.Fatal("RepositoryRootFrom() error = nil, want error")
+		}
+	})
+}
+
 func TestFiles(t *testing.T) {
 	root := t.TempDir()
 	paths := []string{

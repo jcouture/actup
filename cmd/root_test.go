@@ -154,6 +154,59 @@ func TestRootCommandFindsRepositoryFromNestedDirectory(t *testing.T) {
 	}
 }
 
+func TestRootCommandScansSpecifiedDirectory(t *testing.T) {
+	server := currentReleaseServer(t)
+	defer server.Close()
+	oldAPIURL := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = oldAPIURL })
+
+	workingDirectory := repository(t)
+	target := repository(t)
+	original := "steps:\n  - uses: actions/checkout@v4\n"
+	writeWorkflow(t, target, ".github/workflows/ci.yml", original)
+
+	got, err := executeArgsIn(t, workingDirectory, target)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if !bytes.Contains([]byte(got), []byte("Updated 1 reference in 1 file.\n")) {
+		t.Errorf("output = %q", got)
+	}
+	contents, readErr := os.ReadFile(filepath.Join(target, ".github/workflows/ci.yml"))
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	want := "steps:\n  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.0\n"
+	if string(contents) != want {
+		t.Errorf("workflow = %q, want %q", contents, want)
+	}
+}
+
+func TestRootCommandSpecifiedNestedDirectoryFindsRepository(t *testing.T) {
+	workingDirectory := repository(t)
+	target := repository(t)
+	nested := filepath.Join(target, "some", "directory")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := executeArgsIn(t, workingDirectory, nested)
+	if err != nil {
+		t.Fatalf("Execute() error = %v", err)
+	}
+	if want := "All GitHub Actions are current.\n"; got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+}
+
+func TestRootCommandRejectsInvalidScanDirectory(t *testing.T) {
+	workingDirectory := repository(t)
+	if _, err := executeArgsIn(t, workingDirectory, "missing"); err == nil {
+		t.Fatal("Execute() error = nil, want error")
+	}
+}
+
 func TestRootCommandWithoutReferences(t *testing.T) {
 	root := repository(t)
 	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: docker://alpine:latest\n")

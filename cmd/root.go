@@ -72,13 +72,13 @@ func newRootCommand(version string) *cobra.Command {
 	var check bool
 	var ignorePatterns []string
 	command := &cobra.Command{
-		Use:           "actup",
+		Use:           "actup [directory]",
 		Short:         "Pin GitHub Actions to current immutable commit SHAs",
-		Args:          cobra.NoArgs,
+		Args:          cobra.MaximumNArgs(1),
 		Version:       version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
-		RunE: func(command *cobra.Command, _ []string) error {
+		RunE: func(command *cobra.Command, args []string) error {
 			if dryRun && check {
 				return fmt.Errorf("--check and --dry-run are mutually exclusive")
 			}
@@ -87,7 +87,11 @@ func newRootCommand(version string) *cobra.Command {
 			if command.Flags().Changed("config") && configPath == "" {
 				return fmt.Errorf("--config requires a non-empty path")
 			}
-			root, err := discover.RepositoryRoot()
+			start := "."
+			if len(args) == 1 {
+				start = args[0]
+			}
+			root, err := discover.RepositoryRootFrom(start)
 			if err != nil {
 				return err
 			}

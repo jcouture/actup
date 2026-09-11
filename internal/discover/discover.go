@@ -39,7 +39,21 @@ func RepositoryRoot() (string, error) {
 		return "", fmt.Errorf("get current working directory: %w", err)
 	}
 
-	return repositoryRoot(workingDirectory)
+	return RepositoryRootFrom(workingDirectory)
+}
+
+// RepositoryRootFrom finds the Git repository containing start. Start must be
+// an existing directory.
+func RepositoryRootFrom(start string) (string, error) {
+	info, err := os.Stat(start)
+	if err != nil {
+		return "", fmt.Errorf("inspect scan directory %q: %w", start, err)
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("scan path %q is not a directory", start)
+	}
+
+	return repositoryRoot(start)
 }
 
 func repositoryRoot(start string) (string, error) {
