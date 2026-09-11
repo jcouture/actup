@@ -22,16 +22,23 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 
+	"github.com/jcouture/actup/internal/action"
 	"github.com/jcouture/actup/internal/discover"
 	"github.com/spf13/cobra"
 )
 
 // Execute runs the actup root command with the supplied build version.
 func Execute(version string) error {
+	return newRootCommand(version).Execute()
+}
+
+func newRootCommand(version string) *cobra.Command {
 	command := &cobra.Command{
 		Use:           "actup",
-		Short:         "Find GitHub Actions files in a Git repository",
+		Short:         "Find external actions used in a Git repository",
 		Args:          cobra.NoArgs,
 		Version:       version,
 		SilenceErrors: true,
@@ -46,17 +53,39 @@ func Execute(version string) error {
 			if err != nil {
 				return err
 			}
-			if len(files) == 0 {
-				fmt.Fprintln(command.OutOrStdout(), "No GitHub Actions files found.")
-				return nil
-			}
-
+			printed := false
 			for _, file := range files {
+				contents, err := os.OpenInRoot(root, filepath.FromSlash(file))
+				if err != nil {
+					return fmt.Errorf("open %q: %w", file, err)
+				}
+				uses, parseErr := action.Parse(contents)
+				closeErr := contents.Close()
+				if parseErr != nil {
+					return fmt.Errorf("parse %q: %w", file, parseErr)
+				}
+				if closeErr != nil {
+					return fmt.Errorf("close %q: %w", file, closeErr)
+				}
+				if len(uses) == 0 {
+					continue
+				}
+
+				if printed {
+					fmt.Fprintln(command.OutOrStdout())
+				}
 				fmt.Fprintln(command.OutOrStdout(), file)
+				for _, use := range uses {
+					fmt.Fprintf(command.OutOrStdout(), "  %s\n", use.Reference)
+				}
+				printed = true
+			}
+			if !printed {
+				fmt.Fprintln(command.OutOrStdout(), "All GitHub Actions are current.")
 			}
 			return nil
 		},
 	}
 
-	return command.Execute()
+	return command
 }
