@@ -78,9 +78,79 @@ func TestRootCommandPrintsReferencesGroupedByFile(t *testing.T) {
 		".github/workflows/release.yml\n\n" +
 		"  UPDATE  goreleaser/goreleaser-action\n" +
 		"          v6.3.0 -> v7.0.0\n" +
-		"          warning: major version change\n"
+		"          warning: major version change\n\n" +
+		"Updated 3 references in 2 files.\n" +
+		"3 major version updates.\n"
 	if got != want {
 		t.Errorf("output = %q, want %q", got, want)
+	}
+	contents, err := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFile := "jobs:\n  test:\n    steps:\n" +
+		"      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.0\n" +
+		"      - uses: ./.github/actions/build\n" +
+		"      - uses: actions/setup-go@0123456789abcdef0123456789abcdef01234567 # v6.1.0\n"
+	if string(contents) != wantFile {
+		t.Errorf("workflow = %q, want %q", contents, wantFile)
+	}
+}
+
+func TestRootCommandDryRunAndCheckDoNotWrite(t *testing.T) {
+	server := currentReleaseServer(t)
+	defer server.Close()
+	oldAPIURL := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = oldAPIURL })
+
+	for _, test := range []struct {
+		name      string
+		flag      string
+		wantError bool
+		summary   string
+	}{
+		{name: "dry run", flag: "--dry-run", summary: "1 reference would be updated in 1 file.\n"},
+		{name: "check", flag: "--check", wantError: true, summary: "1 reference requires updates in 1 file.\n"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := repository(t)
+			original := "steps:\n  - uses: actions/checkout@v4\n"
+			writeWorkflow(t, root, ".github/workflows/ci.yml", original)
+			got, err := executeArgsIn(t, root, test.flag)
+			if (err != nil) != test.wantError {
+				t.Fatalf("Execute() error = %v", err)
+			}
+			if test.wantError && !IsCheckFailure(err) {
+				t.Fatalf("error = %v, want check failure", err)
+			}
+			if !bytes.Contains([]byte(got), []byte(test.summary)) {
+				t.Errorf("output = %q, want to contain %q", got, test.summary)
+			}
+			contents, readErr := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
+			if readErr != nil || string(contents) != original {
+				t.Errorf("workflow = %q, %v; want unchanged", contents, readErr)
+			}
+		})
+	}
+}
+
+func TestRootCommandRejectsConflictingModes(t *testing.T) {
+	root := repository(t)
+	_, err := executeArgsIn(t, root, "--check", "--dry-run")
+	if err == nil || err.Error() != "--check and --dry-run are mutually exclusive" {
+		t.Fatalf("Execute() error = %v", err)
+	}
+}
+
+func TestRootCommandFindsRepositoryFromNestedDirectory(t *testing.T) {
+	root := repository(t)
+	nested := filepath.Join(root, "a", "b")
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if got := executeIn(t, nested); got != "All GitHub Actions are current.\n" {
+		t.Errorf("output = %q", got)
 	}
 }
 
@@ -168,4 +238,18 @@ func executeArgsIn(t *testing.T, root string, args ...string) (string, error) {
 	command.SetOut(&output)
 	err := command.Execute()
 	return output.String(), err
+}
+
+func currentReleaseServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/repos/actions/checkout/releases":
+			fmt.Fprint(response, `[{"tag_name":"v5.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+		case "/repos/actions/checkout/git/ref/tags/v5.0.0":
+			fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
 }

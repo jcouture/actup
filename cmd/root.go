@@ -21,8 +21,11 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 
@@ -30,27 +33,53 @@ import (
 	"github.com/jcouture/actup/internal/config"
 	"github.com/jcouture/actup/internal/discover"
 	githubapi "github.com/jcouture/actup/internal/github"
+	"github.com/jcouture/actup/internal/output"
 	"github.com/jcouture/actup/internal/resolver"
+	"github.com/jcouture/actup/internal/update"
 	"github.com/spf13/cobra"
 )
 
 var githubAPIURL = "https://api.github.com"
+var errUpdatesRequired = errors.New("updates required")
+
+type fileUpdate struct {
+	path     string
+	contents []byte
+}
 
 // Execute runs the actup root command with the supplied build version.
 func Execute(version string) error {
 	return newRootCommand(version).ExecuteContext(context.Background())
 }
 
+// ExitCode maps command results to the CLI's documented exit statuses.
+func ExitCode(err error) int {
+	if errors.Is(err, errUpdatesRequired) {
+		return 1
+	}
+	return 2
+}
+
+// IsCheckFailure reports whether check mode found available updates.
+func IsCheckFailure(err error) bool {
+	return errors.Is(err, errUpdatesRequired)
+}
+
 func newRootCommand(version string) *cobra.Command {
 	var configPath string
+	var dryRun bool
+	var check bool
 	command := &cobra.Command{
 		Use:           "actup",
-		Short:         "Find external actions used in a Git repository",
+		Short:         "Pin GitHub Actions to current immutable commit SHAs",
 		Args:          cobra.NoArgs,
 		Version:       version,
 		SilenceErrors: true,
 		SilenceUsage:  true,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if dryRun && check {
+				return fmt.Errorf("--check and --dry-run are mutually exclusive")
+			}
 			ctx, cancel := context.WithCancel(command.Context())
 			defer cancel()
 			if command.Flags().Changed("config") && configPath == "" {
@@ -71,19 +100,25 @@ func newRootCommand(version string) *cobra.Command {
 			}
 
 			var occurrences []resolver.Occurrence
+			contentsByFile := make(map[string][]byte, len(files))
 			for _, file := range files {
-				contents, err := os.OpenInRoot(root, filepath.FromSlash(file))
+				opened, err := os.OpenInRoot(root, filepath.FromSlash(file))
 				if err != nil {
 					return fmt.Errorf("open %q: %w", file, err)
 				}
-				uses, parseErr := action.Parse(contents)
-				closeErr := contents.Close()
+				contents, readErr := io.ReadAll(opened)
+				closeErr := opened.Close()
+				if readErr != nil {
+					return fmt.Errorf("read %q: %w", file, readErr)
+				}
+				uses, parseErr := action.Parse(bytes.NewReader(contents))
 				if parseErr != nil {
 					return fmt.Errorf("parse %q: %w", file, parseErr)
 				}
 				if closeErr != nil {
 					return fmt.Errorf("close %q: %w", file, closeErr)
 				}
+				contentsByFile[file] = contents
 				for _, use := range uses {
 					occurrences = append(occurrences, resolver.Occurrence{File: file, Use: use})
 				}
@@ -97,40 +132,53 @@ func newRootCommand(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			if !printResults(command, results) {
-				fmt.Fprintln(command.OutOrStdout(), "All GitHub Actions are current.")
+
+			prepared := make([]fileUpdate, 0, len(files))
+			for _, file := range files {
+				fileResults := resultsForFile(results, file)
+				if len(fileResults) == 0 {
+					continue
+				}
+				contents, err := update.Prepare(contentsByFile[file], fileResults)
+				if err != nil {
+					return fmt.Errorf("prepare %q: %w", file, err)
+				}
+				prepared = append(prepared, fileUpdate{path: filepath.Join(root, filepath.FromSlash(file)), contents: contents})
+			}
+
+			mode := output.Normal
+			if dryRun {
+				mode = output.DryRun
+			} else if check {
+				mode = output.Check
+			}
+			if !dryRun && !check {
+				for _, file := range prepared {
+					if err := update.WriteAtomic(file.path, file.contents); err != nil {
+						return err
+					}
+				}
+			}
+			changed := output.Print(command.OutOrStdout(), results, mode)
+			if check && changed > 0 {
+				return errUpdatesRequired
 			}
 			return nil
 		},
 	}
 	command.Flags().StringVar(&configPath, "config", "", "path to configuration file")
+	command.Flags().BoolVar(&dryRun, "dry-run", false, "print updates without writing files")
+	command.Flags().BoolVar(&check, "check", false, "exit 1 when updates are available")
 
 	return command
 }
 
-func printResults(command *cobra.Command, results []resolver.Result) bool {
-	printed := false
-	currentFile := ""
+func resultsForFile(results []resolver.Result, file string) []resolver.Result {
+	var matching []resolver.Result
 	for _, result := range results {
-		if !result.Changed {
-			continue
+		if result.Changed && result.Occurrence.File == file {
+			matching = append(matching, result)
 		}
-		if result.Occurrence.File != currentFile {
-			if printed {
-				fmt.Fprintln(command.OutOrStdout())
-			}
-			fmt.Fprintln(command.OutOrStdout(), result.Occurrence.File)
-			fmt.Fprintln(command.OutOrStdout())
-			currentFile = result.Occurrence.File
-		} else {
-			fmt.Fprintln(command.OutOrStdout())
-		}
-		fmt.Fprintf(command.OutOrStdout(), "  UPDATE  %s\n", result.Occurrence.Use.Reference.RepositoryID())
-		fmt.Fprintf(command.OutOrStdout(), "          %s -> %s\n", result.Current, result.Target.Tag)
-		if result.MajorChange {
-			fmt.Fprintln(command.OutOrStdout(), "          warning: major version change")
-		}
-		printed = true
 	}
-	return printed
+	return matching
 }
