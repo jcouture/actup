@@ -23,6 +23,8 @@ package resolver
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -30,6 +32,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/jcouture/actup/internal/action"
 	githubapi "github.com/jcouture/actup/internal/github"
 )
@@ -39,7 +42,7 @@ const defaultConcurrency = 8
 var majorPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?)?$`)
 
 type client interface {
-	Resolve(context.Context, string, time.Duration) (githubapi.Target, error)
+	Resolve(context.Context, string, time.Duration, *semver.Constraints) (githubapi.Target, error)
 }
 
 // Occurrence associates a parsed use with its repository-relative file path.
@@ -55,17 +58,21 @@ type Result struct {
 	Current     string
 	Changed     bool
 	MajorChange bool
+	Warning     string
 }
 
 // Resolver performs bounded, deduplicated repository resolution.
 type Resolver struct {
-	client      client
-	concurrency int
+	client        client
+	concurrency   int
+	pinConstraint func(string) *semver.Constraints
 }
 
 // New creates a resolver with the default limit of eight concurrent repositories.
-func New(apiClient *githubapi.Client) *Resolver {
-	return &Resolver{client: apiClient, concurrency: defaultConcurrency}
+// The pinConstraint function returns the semver constraint for a repository, or
+// nil when no pin applies.
+func New(apiClient *githubapi.Client, pinConstraint func(string) *semver.Constraints) *Resolver {
+	return &Resolver{client: apiClient, concurrency: defaultConcurrency, pinConstraint: pinConstraint}
 }
 
 // Resolve resolves every unique repository once and preserves occurrence order.
@@ -97,37 +104,57 @@ func (resolver *Resolver) Resolve(ctx context.Context, occurrences []Occurrence,
 	close(jobs)
 
 	targets := make(map[string]githubapi.Target, len(repositories))
-	var targetsMutex sync.Mutex
+	warnings := make(map[string]string)
+	var mu sync.Mutex
 	workerCount := min(resolver.concurrency, len(repositories))
-	errors := make(chan error, workerCount)
+	errs := make(chan error, workerCount)
 	var workers sync.WaitGroup
 	for range workerCount {
 		workers.Go(func() {
 			for repository := range jobs {
-				target, err := resolver.client.Resolve(ctx, repository, minimumAge)
+				var constraint *semver.Constraints
+				if resolver.pinConstraint != nil {
+					constraint = resolver.pinConstraint(repository)
+				}
+				target, err := resolver.client.Resolve(ctx, repository, minimumAge, constraint)
 				if err != nil {
+					if constraint != nil && errors.Is(err, githubapi.ErrConstraintUnsatisfied) {
+						mu.Lock()
+						warnings[strings.ToLower(repository)] = fmt.Sprintf("no version of %s satisfies allow %q", repository, constraint)
+						mu.Unlock()
+						continue
+					}
 					select {
-					case errors <- err:
+					case errs <- err:
 					default:
 					}
 					cancel()
 					return
 				}
-				targetsMutex.Lock()
+				mu.Lock()
 				targets[strings.ToLower(repository)] = target
-				targetsMutex.Unlock()
+				mu.Unlock()
 			}
 		})
 	}
 	workers.Wait()
-	close(errors)
-	if err := <-errors; err != nil {
+	close(errs)
+	if err := <-errs; err != nil {
 		return nil, err
 	}
 
 	results := make([]Result, 0, len(occurrences))
 	for _, occurrence := range occurrences {
-		target := targets[strings.ToLower(occurrence.Use.Reference.RepositoryID())]
+		key := strings.ToLower(occurrence.Use.Reference.RepositoryID())
+		if warning, ok := warnings[key]; ok {
+			results = append(results, Result{
+				Occurrence: occurrence,
+				Current:    currentVersion(occurrence.Use),
+				Warning:    warning,
+			})
+			continue
+		}
+		target := targets[key]
 		current := currentVersion(occurrence.Use)
 		currentMajor, knownMajor := semanticMajor(current)
 		changed := !action.IsSHA(occurrence.Use.Reference.Ref) ||

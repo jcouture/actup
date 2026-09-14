@@ -28,9 +28,11 @@ import (
 	"os"
 	pathpkg "path"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -40,11 +42,19 @@ const defaultMinReleaseAge = "24h"
 type Config struct {
 	MinReleaseAge time.Duration
 	Ignore        []string
+	Allow         []AllowEntry
+}
+
+// AllowEntry pairs a glob pattern with a parsed semver constraint.
+type AllowEntry struct {
+	Pattern    string
+	Constraint *semver.Constraints
 }
 
 type fileConfig struct {
-	MinReleaseAge string   `toml:"min-release-age"`
-	Ignore        []string `toml:"ignore"`
+	MinReleaseAge string            `toml:"min-release-age"`
+	Ignore        []string          `toml:"ignore"`
+	Allow         map[string]string `toml:"allow"`
 }
 
 // Load reads the explicit configuration path, or .actup.toml under root when
@@ -81,11 +91,42 @@ func Load(root, path string) (Config, error) {
 		}
 	}
 
+	var allow []AllowEntry
+	for pattern, constraintStr := range decoded.Allow {
+		if _, err := pathpkg.Match(pattern, ""); err != nil {
+			return Config{}, fmt.Errorf("parse config %q: allow[%q]: %w", path, pattern, err)
+		}
+		constraint, err := semver.NewConstraint(constraintStr)
+		if err != nil {
+			return Config{}, fmt.Errorf("parse config %q: allow[%q]: invalid constraint %q", path, pattern, constraintStr)
+		}
+		allow = append(allow, AllowEntry{Pattern: pattern, Constraint: constraint})
+	}
+	sort.Slice(allow, func(i, j int) bool {
+		return allow[i].Pattern < allow[j].Pattern
+	})
+
 	minimumAge, err := parseDuration(decoded.MinReleaseAge)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse config %q: min-release-age: %w", path, err)
 	}
-	return Config{MinReleaseAge: minimumAge, Ignore: decoded.Ignore}, nil
+	return Config{MinReleaseAge: minimumAge, Ignore: decoded.Ignore, Allow: allow}, nil
+}
+
+// AllowConstraint returns the semver constraint for repository, or nil if no
+// allow pattern matches. When multiple patterns match, the longest pattern wins.
+func (cfg Config) AllowConstraint(repository string) *semver.Constraints {
+	var best *AllowEntry
+	for i := range cfg.Allow {
+		matched, _ := pathpkg.Match(cfg.Allow[i].Pattern, repository)
+		if matched && (best == nil || len(cfg.Allow[i].Pattern) > len(best.Pattern)) {
+			best = &cfg.Allow[i]
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	return best.Constraint
 }
 
 func defaults() Config {

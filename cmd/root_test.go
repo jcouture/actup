@@ -366,6 +366,90 @@ func TestRootCommandIgnoreInReadOnlyModes(t *testing.T) {
 	}
 }
 
+func TestRootCommandAllowConstrainsVersion(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/repos/actions/checkout/releases":
+			fmt.Fprint(response, `[
+				{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"},
+				{"tag_name":"v5.2.0","published_at":"2020-01-01T00:00:00Z"},
+				{"tag_name":"v5.1.0","published_at":"2020-01-01T00:00:00Z"}
+			]`)
+		case "/repos/actions/checkout/git/ref/tags/v5.2.0":
+			fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	oldAPIURL := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = oldAPIURL })
+
+	root := repository(t)
+	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("[allow]\n\"actions/checkout\" = \"^5\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: actions/checkout@v5\n")
+
+	got := executeIn(t, root)
+	want := ".github/workflows/ci.yml\n\n" +
+		"  PIN     actions/checkout\n" +
+		"          v5 -> v5.2.0\n\n" +
+		"Updated 1 reference in 1 file.\n"
+	if got != want {
+		t.Errorf("output = %q, want %q", got, want)
+	}
+
+	contents, err := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantFile := "steps:\n  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.2.0\n"
+	if string(contents) != wantFile {
+		t.Errorf("workflow = %q, want %q", contents, wantFile)
+	}
+}
+
+func TestRootCommandAllowConstraintUnsatisfiedWarning(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/repos/actions/checkout/releases":
+			fmt.Fprint(response, `[{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+		case "/repos/actions/checkout/tags":
+			fmt.Fprint(response, `[{"name":"v6.0.0"}]`)
+		default:
+			http.NotFound(response, request)
+		}
+	}))
+	defer server.Close()
+	oldAPIURL := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = oldAPIURL })
+
+	root := repository(t)
+	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("[allow]\n\"actions/checkout\" = \"^5\"\n"), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: actions/checkout@v5\n")
+
+	got := executeIn(t, root)
+	if !bytes.Contains([]byte(got), []byte("warning:")) {
+		t.Errorf("output = %q, want warning", got)
+	}
+	if !bytes.Contains([]byte(got), []byte("All GitHub Actions are current.")) {
+		t.Errorf("output = %q, want current message", got)
+	}
+
+	contents, err := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "steps:\n  - uses: actions/checkout@v5\n" {
+		t.Errorf("workflow should be unchanged, got %q", contents)
+	}
+}
+
 func TestRootCommandRejectsInvalidIgnorePattern(t *testing.T) {
 	root := repository(t)
 	_, err := executeArgsIn(t, root, "--ignore", "actions/[invalid")

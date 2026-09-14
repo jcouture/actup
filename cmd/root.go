@@ -144,7 +144,7 @@ func newRootCommand(version string) *cobra.Command {
 				BaseURL: githubAPIURL,
 				Token:   os.Getenv("GITHUB_TOKEN"),
 			})
-			results, err := resolver.New(apiClient).Resolve(ctx, occurrences, configuration.MinReleaseAge)
+			results, err := resolver.New(apiClient, configuration.AllowConstraint).Resolve(ctx, occurrences, configuration.MinReleaseAge)
 			if err != nil {
 				return err
 			}

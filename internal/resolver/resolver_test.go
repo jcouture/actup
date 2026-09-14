@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Masterminds/semver/v3"
 	"github.com/jcouture/actup/internal/action"
 	githubapi "github.com/jcouture/actup/internal/github"
 )
@@ -50,7 +51,7 @@ func TestHighestEligibleReleaseAndMajorChange(t *testing.T) {
 	})
 	defer closeServer()
 
-	results, err := New(api).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v4", "")}, 0)
+	results, err := New(api, nil).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v4", "")}, 0)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -74,7 +75,7 @@ func TestMinimumAgeSelectsOlderRelease(t *testing.T) {
 	})
 	defer closeServer()
 
-	results, err := New(api).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v1", "")}, 24*time.Hour)
+	results, err := New(api, nil).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v1", "")}, 24*time.Hour)
 	if err != nil || len(results) != 1 || results[0].Target.Tag != "v1.5.0" {
 		t.Fatalf("Resolve() = %#v, %v (now %s)", results, err, now)
 	}
@@ -92,7 +93,7 @@ func TestTagFallback(t *testing.T) {
 		}
 	})
 	defer closeServer()
-	results, err := New(api).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v2", "")}, 0)
+	results, err := New(api, nil).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v2", "")}, 0)
 	if err != nil || results[0].Target.Tag != "v2.3.0" {
 		t.Fatalf("Resolve() = %#v, %v", results, err)
 	}
@@ -112,7 +113,7 @@ func TestUnknownMajorAndAlreadyCurrentSHA(t *testing.T) {
 		occurrence("ci.yml", 2, "owner/repo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ""),
 		occurrence("ci.yml", 3, "owner/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "# v4.2.2"),
 	}
-	results, err := New(api).Resolve(context.Background(), occurrences, 0)
+	results, err := New(api, nil).Resolve(context.Background(), occurrences, 0)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -149,7 +150,7 @@ func TestDeduplicatesAndOrdersConcurrentResolution(t *testing.T) {
 		occurrence("a.yml", 1, "owner/repo", "v1", ""),
 		occurrence("z.yml", 1, "owner/repo", "v1", ""),
 	}
-	results, err := New(api).Resolve(context.Background(), occurrences, 0)
+	results, err := New(api, nil).Resolve(context.Background(), occurrences, 0)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -165,6 +166,69 @@ func TestDeduplicatesAndOrdersConcurrentResolution(t *testing.T) {
 	defer mutex.Unlock()
 	if releaseCalls["owner/repo"] != 1 || releaseCalls["other/tool"] != 1 {
 		t.Errorf("release calls = %#v", releaseCalls)
+	}
+}
+
+func TestPinConstraintSelectsConstrainedVersion(t *testing.T) {
+	api, closeServer := resolverAPI(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/releases"):
+			fmt.Fprint(response, `[
+				{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"},
+				{"tag_name":"v5.3.0","published_at":"2020-01-01T00:00:00Z"}
+			]`)
+		case strings.HasSuffix(request.URL.Path, "/git/ref/tags/v5.3.0"):
+			commit(response, resolvedSHA)
+		}
+	})
+	defer closeServer()
+
+	constraint, _ := semver.NewConstraint("^5")
+	pinFn := func(repo string) *semver.Constraints {
+		if repo == "owner/repo" {
+			return constraint
+		}
+		return nil
+	}
+	results, err := New(api, pinFn).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v5", "")}, 0)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(results) != 1 || results[0].Target.Tag != "v5.3.0" || !results[0].Changed || results[0].MajorChange {
+		t.Fatalf("Resolve() = %#v", results)
+	}
+}
+
+func TestPinConstraintUnsatisfiedProducesWarning(t *testing.T) {
+	api, closeServer := resolverAPI(t, func(response http.ResponseWriter, request *http.Request) {
+		switch {
+		case strings.HasSuffix(request.URL.Path, "/releases"):
+			fmt.Fprint(response, `[{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+		case strings.HasSuffix(request.URL.Path, "/tags"):
+			fmt.Fprint(response, `[{"name":"v6.0.0"}]`)
+		}
+	})
+	defer closeServer()
+
+	constraint, _ := semver.NewConstraint("^5")
+	pinFn := func(string) *semver.Constraints { return constraint }
+	results, err := New(api, pinFn).Resolve(context.Background(), []Occurrence{
+		occurrence("ci.yml", 1, "owner/repo", "v5", ""),
+		occurrence("ci.yml", 2, "owner/repo", "v5", ""),
+	}, 0)
+	if err != nil {
+		t.Fatalf("Resolve() error = %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("Resolve() returned %d results, want 2", len(results))
+	}
+	for i, result := range results {
+		if result.Changed {
+			t.Errorf("results[%d].Changed = true, want false", i)
+		}
+		if result.Warning == "" {
+			t.Errorf("results[%d].Warning is empty, want warning", i)
+		}
 	}
 }
 

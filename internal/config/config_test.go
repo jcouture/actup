@@ -181,6 +181,118 @@ func TestLoadFileBehavior(t *testing.T) {
 	})
 }
 
+func TestLoadAllowConstraints(t *testing.T) {
+	tests := []struct {
+		name       string
+		contents   string
+		wantCount  int
+		repository string
+		wantMatch  bool
+	}{
+		{
+			name:       "caret constraint",
+			contents:   "[allow]\n\"actions/checkout\" = \"^5\"\n",
+			wantCount:  1,
+			repository: "actions/checkout",
+			wantMatch:  true,
+		},
+		{
+			name:       "tilde constraint",
+			contents:   "[allow]\n\"actions/setup-go\" = \"~4.1\"\n",
+			wantCount:  1,
+			repository: "actions/setup-go",
+			wantMatch:  true,
+		},
+		{
+			name:       "range constraint",
+			contents:   "[allow]\n\"aws-actions/*\" = \">= 2, < 4\"\n",
+			wantCount:  1,
+			repository: "aws-actions/configure-credentials",
+			wantMatch:  true,
+		},
+		{
+			name:       "no match",
+			contents:   "[allow]\n\"actions/checkout\" = \"^5\"\n",
+			wantCount:  1,
+			repository: "actions/setup-go",
+			wantMatch:  false,
+		},
+		{
+			name:       "empty allow table",
+			contents:   "[allow]\n",
+			wantCount:  0,
+			repository: "actions/checkout",
+			wantMatch:  false,
+		},
+		{
+			name:       "absent allow table",
+			contents:   "min-release-age = \"24h\"\n",
+			wantCount:  0,
+			repository: "actions/checkout",
+			wantMatch:  false,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			root := t.TempDir()
+			path := writeConfig(t, root, "config.toml", test.contents)
+			got, err := Load(root, path)
+			if err != nil {
+				t.Fatalf("Load() error = %v", err)
+			}
+			if len(got.Allow) != test.wantCount {
+				t.Fatalf("Allow count = %d, want %d", len(got.Allow), test.wantCount)
+			}
+			constraint := got.AllowConstraint(test.repository)
+			if (constraint != nil) != test.wantMatch {
+				t.Errorf("AllowConstraint(%q) match = %v, want %v", test.repository, constraint != nil, test.wantMatch)
+			}
+		})
+	}
+}
+
+func TestLoadAllowInvalidConstraint(t *testing.T) {
+	root := t.TempDir()
+	path := writeConfig(t, root, "config.toml", "[allow]\n\"actions/checkout\" = \"not a constraint\"\n")
+	if _, err := Load(root, path); err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+}
+
+func TestLoadAllowInvalidPattern(t *testing.T) {
+	root := t.TempDir()
+	path := writeConfig(t, root, "config.toml", "[allow]\n\"actions/[invalid\" = \"^5\"\n")
+	if _, err := Load(root, path); err == nil {
+		t.Fatal("Load() error = nil, want error")
+	}
+}
+
+func TestAllowConstraintMostSpecificWins(t *testing.T) {
+	root := t.TempDir()
+	path := writeConfig(t, root, "config.toml", "[allow]\n\"actions/*\" = \"^5\"\n\"actions/checkout\" = \"^4\"\n")
+	got, err := Load(root, path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+
+	constraint := got.AllowConstraint("actions/checkout")
+	if constraint == nil {
+		t.Fatal("AllowConstraint() = nil, want constraint")
+	}
+	if constraint.String() != "^4" {
+		t.Errorf("AllowConstraint() = %q, want ^4", constraint)
+	}
+
+	constraint = got.AllowConstraint("actions/setup-go")
+	if constraint == nil {
+		t.Fatal("AllowConstraint(actions/setup-go) = nil, want constraint")
+	}
+	if constraint.String() != "^5" {
+		t.Errorf("AllowConstraint(actions/setup-go) = %q, want ^5", constraint)
+	}
+}
+
 func writeConfig(t *testing.T, root, name, contents string) string {
 	t.Helper()
 	path := filepath.Join(root, name)

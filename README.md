@@ -86,6 +86,29 @@ actup --ignore 'actions/*' --ignore 'github/codeql-action'
 
 Command-line exclusions are added to those in the config file.
 
+### Allow
+
+The `[allow]` table constrains which versions Actup may select for specific actions. Allowed actions are still updated and SHA-pinned, but only to versions that satisfy the constraint.
+
+```toml
+[allow]
+"actions/checkout" = "^5"            # minor + patch updates within v5
+"actions/setup-node" = "~4.1"        # patch updates to 4.1.x only
+"aws-actions/*" = ">= 2, < 4"       # explicit range
+"actions/upload-artifact" = "4.1.0"  # exact version
+```
+
+Keys are action patterns using the same glob syntax as `ignore`. Values are [semver constraints](https://github.com/Masterminds/semver#checking-version-constraints):
+
+| Syntax | Meaning |
+|--------|---------|
+| `^5` or `^5.2.1` | Same major, any minor and patch |
+| `~4.1` or `~4.1.3` | Same major.minor, patches only |
+| `4.1.0` | Exact version |
+| `>= 2, < 4` | Explicit range |
+
+When multiple patterns match the same action, the longest pattern wins. Ignored actions take priority over allowed actions. If no version satisfies an allow constraint, Actup prints a warning and leaves the action unchanged.
+
 ## Scope
 
 Actup scans:
