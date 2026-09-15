@@ -1,1 +1,4 @@
 min-release-age = "24h"
+
+[allow]
+"actions/*" = "^7"
