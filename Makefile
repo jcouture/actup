@@ -13,7 +13,7 @@ BUILD_FLAGS ?= $(strip $(if $(LDFLAGS),-ldflags "$(LDFLAGS)"))
 
 TEST_PKGS ?= ./...
 
-.PHONY: build clean help fmt fix vet gosec vulncheck tidy precommit test install uninstall print-version
+.PHONY: build clean help fmt fix vet gosec vulncheck tidy precommit test install uninstall print-version tag
 
 .DEFAULT_GOAL := help
 
@@ -81,6 +81,16 @@ tidy:
 ## Pre-commit checks (writes fmt/tidy)
 precommit: fmt fix tidy vet gosec vulncheck test
 	@echo "Pre-commit checks passed"
+
+## Create an annotated semver tag (usage: make tag VERSION=vX.Y.Z)
+tag:
+	@if [ "$(origin VERSION)" != "command line" ] || [ -z "$(VERSION)" ]; then \
+		echo "Usage: make tag VERSION=vX.Y.Z" >&2; \
+		exit 2; \
+	fi; \
+	echo "Creating tag $(VERSION)"; \
+	git tag -a "$(VERSION)" -s -m "Release $(VERSION)"; \
+	echo "Created $(VERSION)"
 
 ## Clean build artifacts
 clean:
