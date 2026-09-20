@@ -12,6 +12,7 @@ LDFLAGS ?= -X main.Version=$(VERSION)
 BUILD_FLAGS ?= $(strip $(if $(LDFLAGS),-ldflags "$(LDFLAGS)"))
 
 TEST_PKGS ?= ./...
+MISE ?= mise
 
 .PHONY: build clean help fmt fix vet gosec vulncheck tidy precommit test install uninstall print-version tag
 
@@ -19,7 +20,7 @@ TEST_PKGS ?= ./...
 
 ## Run unit tests
 test:
-	@go run gotest.tools/gotestsum@v1.13.0 --format=testdox -- -coverprofile=coverage.out -covermode=atomic $(TEST_PKGS)
+	@$(MISE) exec -- gotestsum --format=testdox -- -coverprofile=coverage.out -covermode=atomic $(TEST_PKGS)
 	@go tool cover -func=coverage.out | grep total | awk '{print "Total coverage: " $$3}'
 
 ## Build the binary
@@ -65,12 +66,12 @@ vet:
 
 ## Security analysis (gosec)
 gosec:
-	@go run github.com/securego/gosec/v2/cmd/gosec@v2.22.1 ./...
+	@$(MISE) exec -- gosec ./...
 	@echo "Gosec passed"
 
 ## Vulnerability scanning
 vulncheck:
-	@go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+	@$(MISE) exec -- govulncheck ./...
 	@echo "Vulnerability scan passed"
 
 ## Tidy modules (writes go.mod/go.sum if needed)
@@ -104,4 +105,4 @@ clean:
 help:
 	@echo "$(APP) - Available targets:"
 	@echo ""
-	@awk '/^##/{help=$$0; sub(/^## */, "", help); next} /^[[:alnum:]_.-]+:/{target=$$1; sub(/:.*/, "", target); if(help){printf "  \\033[36m%-18s\\033[0m %s\\n", target, help; help=""}}' $(MAKEFILE_LIST)
+	@awk '/^##/{help=$$0; sub(/^## */, "", help); next} /^[[:alnum:]_.-]+:/{target=$$1; sub(/:.*/, "", target); if(help){printf "  \033[36m%-18s\033[0m %s\n", target, help; help=""}}' $(MAKEFILE_LIST)
