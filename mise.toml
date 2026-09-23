@@ -1,5 +1,7 @@
 [tools]
+cosign = "3.1.1"
 go = "1.26.8"
+goreleaser = "2.18.2"
 gotestsum = "1.13.0"
 "go:github.com/securego/gosec/v2/cmd/gosec" = "v2.29.0"
 "go:golang.org/x/vuln/cmd/govulncheck" = "v1.8.0"

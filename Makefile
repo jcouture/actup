@@ -1,6 +1,7 @@
 APP ?= actup
 BIN_DIR ?= bin
 BIN ?= $(BIN_DIR)/$(APP)
+GORELEASER ?= $(MISE) exec -- goreleaser
 
 GOFLAGS ?= -trimpath -buildvcs=false
 GOCACHE_DIR ?= $(CURDIR)/.gocache
@@ -14,7 +15,7 @@ BUILD_FLAGS ?= $(strip $(if $(LDFLAGS),-ldflags "$(LDFLAGS)"))
 TEST_PKGS ?= ./...
 MISE ?= mise
 
-.PHONY: build clean help fmt fix vet gosec vulncheck tidy precommit test install uninstall print-version tag
+.PHONY: build clean help fmt fix vet gosec vulncheck tidy precommit test install uninstall print-version release-snapshot tag
 
 .DEFAULT_GOAL := help
 
@@ -32,6 +33,11 @@ build:
 ## Print the computed release version
 print-version:
 	@printf '%s\n' "$(VERSION)"
+
+## Build release artifacts locally without publishing
+release-snapshot:
+	@$(GORELEASER) release --snapshot --clean --skip=sign
+	@echo "Snapshot artifacts written to dist/"
 
 ## Install to GOBIN
 install:

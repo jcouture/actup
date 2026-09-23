@@ -18,6 +18,12 @@ The SHA is resolved from GitHub; the value above is only an example.
 go install github.com/jcouture/actup@latest
 ```
 
+On macOS, install the Homebrew cask:
+
+```bash
+brew install --cask jcouture/tap/actup
+```
+
 To build from source with the Go version pinned in `mise.toml`:
 
 ```bash
@@ -130,6 +136,8 @@ make precommit  # format, analyze, scan, and test
 ```
 
 Run `make help` for all targets. Issues and pull requests are welcome on [GitHub](https://github.com/jcouture/actup).
+
+Maintainers can find the tag-driven release procedure in [docs/RELEASE.md](docs/RELEASE.md).
 
 ## License
 

@@ -1,0 +1,87 @@
+version: 2
+
+project_name: actup
+
+before:
+  hooks:
+    - go test ./...
+
+builds:
+  - id: actup
+    main: .
+    binary: actup
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - >-
+        -s -w
+        -X main.Version={{ .Version }}
+
+archives:
+  - id: actup
+    ids:
+      - actup
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    files:
+      - LICENSE
+      - README.md
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+signs:
+  - cmd: cosign
+    signature: "${artifact}.sigstore.json"
+    stdin: "{{ .Env.COSIGN_PASSWORD }}"
+    args:
+      - sign-blob
+      - --key=env://COSIGN_PRIVATE_KEY
+      - --bundle=${signature}
+      - ${artifact}
+      - --yes
+    artifacts: checksum
+
+checksum:
+  name_template: checksums.txt
+
+snapshot:
+  version_template: "{{ .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs:"
+      - "^test:"
+      - "^chore:"
+
+homebrew_casks:
+  - name: actup
+    ids:
+      - actup
+    binaries:
+      - actup
+    repository:
+      owner: jcouture
+      name: homebrew-tap
+    directory: Casks
+    homepage: https://github.com/jcouture/actup
+    description: Pin GitHub Actions to immutable commit SHAs
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/actup"]
+          end

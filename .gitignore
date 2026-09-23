@@ -1,5 +1,6 @@
 # Binaries for programs and plugins
 bin/
+dist/
 *.exe
 *.exe~
 *.dll
@@ -24,6 +25,9 @@ go.work.sum
 
 # Build cache
 .gocache/
+
+# Cosign files
+cosign.key
 
 # env files
 .env
