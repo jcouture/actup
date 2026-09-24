@@ -39,6 +39,19 @@ make build
 
 The binary is written to `bin/actup`.
 
+### Verify a release archive
+
+Download the archive, `checksums.txt`, and `checksums.txt.sigstore.json` from the same [GitHub release](https://github.com/jcouture/actup/releases). Verify the signed checksums with [Cosign](https://github.com/sigstore/cosign) and the committed [public key](cosign.pub):
+
+```bash
+cosign verify-blob \
+  --key https://raw.githubusercontent.com/jcouture/actup/main/cosign.pub \
+  --bundle checksums.txt.sigstore.json \
+  checksums.txt
+```
+
+Then compare your archive's SHA-256 hash with its entry in `checksums.txt`.
+
 ## Use
 
 Run Actup anywhere inside a Git repository:
