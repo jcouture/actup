@@ -14,15 +14,19 @@ The SHA is resolved from GitHub; the value above is only an example.
 
 ## Install
 
-```bash
-go install github.com/jcouture/actup@latest
-```
-
-On macOS, install the Homebrew cask:
+### Homebrew (macOS)
 
 ```bash
 brew install --cask jcouture/tap/actup
 ```
+
+### Go
+
+```bash
+go install github.com/jcouture/actup@latest
+```
+
+### Build from source
 
 To build from source with the Go version pinned in `mise.toml`:
 
