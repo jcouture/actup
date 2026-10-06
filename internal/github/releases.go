@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/Masterminds/semver/v3"
+	"github.com/rs/zerolog"
 )
 
 const pageSize = 100
@@ -59,9 +60,11 @@ func (client *Client) latestTag(ctx context.Context, repository string, minimumA
 	if err != nil {
 		return candidate{}, err
 	}
+	logger := zerolog.Ctx(ctx)
 	cutoff := client.now().UTC().Add(-minimumAge)
 	var best candidate
 	for page := 1; ; page++ {
+		logger.Debug().Str("repository", repository).Int("page", page).Msg("fetching releases")
 		var releases []release
 		endpoint := fmt.Sprintf("/repos/%s/%s/releases?per_page=%d&page=%d", owner, name, pageSize, page)
 		if err := client.get(ctx, endpoint, &releases); err != nil {
@@ -93,6 +96,7 @@ func (client *Client) latestTag(ctx context.Context, repository string, minimumA
 	if best.version != nil {
 		return best, nil
 	}
+	logger.Debug().Str("repository", repository).Msg("no releases found, falling back to tags")
 	return client.latestRepositoryTag(ctx, owner, name, constraint)
 }
 
