@@ -37,6 +37,7 @@ import (
 	"github.com/jcouture/actup/internal/output"
 	"github.com/jcouture/actup/internal/resolver"
 	"github.com/jcouture/actup/internal/update"
+	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
 
@@ -70,6 +71,7 @@ func newRootCommand(version string) *cobra.Command {
 	var configPath string
 	var dryRun bool
 	var check bool
+	var verbose bool
 	var ignorePatterns []string
 	command := &cobra.Command{
 		Use:           "actup [directory]",
@@ -84,6 +86,16 @@ func newRootCommand(version string) *cobra.Command {
 			}
 			ctx, cancel := context.WithCancel(command.Context())
 			defer cancel()
+
+			logger := zerolog.Nop()
+			if verbose {
+				logger = zerolog.New(zerolog.ConsoleWriter{
+					Out:             os.Stderr,
+					FormatTimestamp: func(any) string { return "" },
+				})
+			}
+			ctx = logger.WithContext(ctx)
+
 			if command.Flags().Changed("config") && configPath == "" {
 				return fmt.Errorf("--config requires a non-empty path")
 			}
@@ -95,10 +107,18 @@ func newRootCommand(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			logger.Debug().Str("root", root).Msg("repository root")
+
 			configuration, err := config.Load(root, configPath)
 			if err != nil {
 				return err
 			}
+			logger.Debug().
+				Int("ignore", len(configuration.Ignore)).
+				Int("allow", len(configuration.Allow)).
+				Str("min_release_age", configuration.MinReleaseAge.String()).
+				Msg("configuration loaded")
+
 			for index, pattern := range ignorePatterns {
 				if _, err := path.Match(pattern, ""); err != nil {
 					return fmt.Errorf("--ignore[%d]: %w", index, err)
@@ -110,6 +130,7 @@ func newRootCommand(version string) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			logger.Debug().Int("count", len(files)).Strs("files", files).Msg("workflow files discovered")
 
 			var occurrences []resolver.Occurrence
 			contentsByFile := make(map[string][]byte, len(files))
@@ -130,20 +151,26 @@ func newRootCommand(version string) *cobra.Command {
 				if closeErr != nil {
 					return fmt.Errorf("close %q: %w", file, closeErr)
 				}
+				logger.Debug().Str("file", file).Int("actions", len(uses)).Msg("parsed")
 				contentsByFile[file] = contents
 				for _, use := range uses {
 					occurrences = append(occurrences, resolver.Occurrence{File: file, Use: use})
 				}
 			}
+			before := len(occurrences)
 			occurrences, err = filterIgnored(occurrences, configuration.Ignore)
 			if err != nil {
 				return err
+			}
+			if ignored := before - len(occurrences); ignored > 0 {
+				logger.Debug().Int("ignored", ignored).Msg("actions filtered by ignore patterns")
 			}
 
 			apiClient := githubapi.NewClient(githubapi.ClientConfig{
 				BaseURL: githubAPIURL,
 				Token:   os.Getenv("GITHUB_TOKEN"),
 			})
+			logger.Debug().Int("occurrences", len(occurrences)).Msg("resolving actions")
 			results, err := resolver.New(apiClient, configuration.AllowConstraint).Resolve(ctx, occurrences, configuration.MinReleaseAge)
 			if err != nil {
 				return err
@@ -170,6 +197,7 @@ func newRootCommand(version string) *cobra.Command {
 			}
 			if !dryRun && !check {
 				for _, file := range prepared {
+					logger.Debug().Str("path", file.path).Msg("writing file")
 					if err := update.WriteAtomic(file.path, file.contents); err != nil {
 						return err
 					}
@@ -185,6 +213,7 @@ func newRootCommand(version string) *cobra.Command {
 	command.Flags().StringVar(&configPath, "config", "", "path to configuration file")
 	command.Flags().BoolVar(&dryRun, "dry-run", false, "print updates without writing files")
 	command.Flags().BoolVar(&check, "check", false, "exit 1 when updates are available")
+	command.Flags().BoolVarP(&verbose, "verbose", "v", false, "show diagnostic output on stderr")
 	command.Flags().StringArrayVar(&ignorePatterns, "ignore", nil, "action pattern to exclude (may be repeated)")
 
 	return command

@@ -35,6 +35,7 @@ import (
 	"github.com/Masterminds/semver/v3"
 	"github.com/jcouture/actup/internal/action"
 	githubapi "github.com/jcouture/actup/internal/github"
+	"github.com/rs/zerolog"
 )
 
 const defaultConcurrency = 8
@@ -95,6 +96,7 @@ func (resolver *Resolver) Resolve(ctx context.Context, occurrences []Occurrence,
 		}
 	}
 
+	logger := zerolog.Ctx(ctx)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	jobs := make(chan string, len(repositories))
@@ -107,11 +109,13 @@ func (resolver *Resolver) Resolve(ctx context.Context, occurrences []Occurrence,
 	warnings := make(map[string]string)
 	var mu sync.Mutex
 	workerCount := min(resolver.concurrency, len(repositories))
+	logger.Debug().Int("workers", workerCount).Int("repositories", len(repositories)).Msg("starting resolution")
 	errs := make(chan error, workerCount)
 	var workers sync.WaitGroup
 	for range workerCount {
 		workers.Go(func() {
 			for repository := range jobs {
+				logger.Debug().Str("repository", repository).Msg("resolving")
 				var constraint *semver.Constraints
 				if resolver.pinConstraint != nil {
 					constraint = resolver.pinConstraint(repository)
@@ -122,6 +126,7 @@ func (resolver *Resolver) Resolve(ctx context.Context, occurrences []Occurrence,
 						mu.Lock()
 						warnings[strings.ToLower(repository)] = fmt.Sprintf("no version of %s satisfies allow %q", repository, constraint)
 						mu.Unlock()
+						logger.Warn().Str("repository", repository).Msg("no version satisfies constraint")
 						continue
 					}
 					select {
@@ -131,6 +136,7 @@ func (resolver *Resolver) Resolve(ctx context.Context, occurrences []Occurrence,
 					cancel()
 					return
 				}
+				logger.Debug().Str("repository", repository).Str("tag", target.Tag).Str("sha", target.SHA).Msg("resolved")
 				mu.Lock()
 				targets[strings.ToLower(repository)] = target
 				mu.Unlock()
