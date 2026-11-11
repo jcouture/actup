@@ -42,7 +42,7 @@ func Load(root, path string) (Config, error) {
 	if !explicit {
 		path = filepath.Join(root, ".actup.toml")
 	}
-	file, err := os.Open(path)
+	file, err := os.Open(filepath.Clean(path))
 	if errors.Is(err, fs.ErrNotExist) && !explicit {
 		return Config{24 * time.Hour}, nil
 	}

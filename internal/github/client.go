@@ -23,10 +23,12 @@ package github
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -41,10 +43,13 @@ type ClientConfig struct {
 
 // Client is a reusable GitHub API client.
 type Client struct {
-	baseURL string
-	token   string
-	http    *http.Client
-	now     func() time.Time
+	baseURL    string
+	token      string
+	http       *http.Client
+	now        func() time.Time
+	mu         sync.Mutex
+	identities map[string]Identity
+	refs       map[string]string
 }
 
 // Target is the selected stable version and the commit to which its tag points.
@@ -70,7 +75,9 @@ func NewClient(configuration ClientConfig) *Client {
 		http: &http.Client{
 			Timeout: 15 * time.Second,
 		},
-		now: now,
+		now:        now,
+		identities: make(map[string]Identity),
+		refs:       make(map[string]string),
 	}
 }
 
@@ -99,14 +106,25 @@ func (client *Client) get(ctx context.Context, endpoint string, target any) erro
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		if (response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusTooManyRequests) &&
 			response.Header.Get("X-RateLimit-Remaining") == "0" {
+			if reset := response.Header.Get("X-RateLimit-Reset"); reset != "" {
+				return fmt.Errorf("GitHub API rate limit exceeded (reset: %s)", reset)
+			}
 			return fmt.Errorf("GitHub API rate limit exceeded")
 		}
-		return fmt.Errorf("GitHub API returned %d", response.StatusCode)
+		return &HTTPError{Status: response.StatusCode}
 	}
 	if err := json.NewDecoder(response.Body).Decode(target); err != nil {
 		return fmt.Errorf("decode GitHub API response: %w", err)
 	}
 	return nil
+}
+
+type HTTPError struct{ Status int }
+
+func (e *HTTPError) Error() string { return fmt.Sprintf("GitHub API returned %d", e.Status) }
+func IsNotFound(err error) bool {
+	var e *HTTPError
+	return errors.As(err, &e) && e.Status == http.StatusNotFound
 }
 
 func repositoryParts(repository string) (string, string, error) {

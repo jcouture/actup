@@ -1,34 +1,59 @@
 # actup
 
-Actup updates external GitHub Actions dependencies in a Git repository. Run it from any directory inside the working tree:
+Actup is a native Go CLI that updates GitHub Actions dependencies in a Git working tree. Run it from any directory in the repository:
 
 ```bash
 actup
 ```
 
-It scans workflow files directly under `.github/workflows`, action definitions under `.github/actions`, and root `action.yml` or `action.yaml`. It selects the newest eligible stable, complete semantic version from GitHub Releases, then falls back to tags if no eligible release exists. Releases must be at least 24 hours old by default; tag-only results have no publication date, so that age policy cannot apply to them.
+It discovers workflows directly under `.github/workflows`, selects the newest eligible stable, complete semantic version of each direct external Action or reusable workflow, and applies updates automatically. It warns about major version changes. It uses GitHub Releases first and falls back to tags when no eligible Release is available. Tag-only fallback cannot verify publication age.
 
-In repositories without `.github/workflows/actions.lock`, Actup automatically replaces external action and reusable workflow refs with the resolved full commit SHA. It adds a version comment when there is no comment, replaces an Actup-owned version comment, and preserves human comments. It preserves unrelated file bytes and warns when the old and new semantic major versions differ. Major updates are applied automatically.
+## Repository modes
+
+**Legacy mode** applies when `.github/workflows/actions.lock` is absent. Actup pins external Actions directly to full commit SHAs:
 
 ```yaml
-# Before
-- uses: actions/checkout@v4
-# After (example SHA)
 - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 ```
 
-Use `actup --dry-run` to preview without writing. Use `actup --check` in CI: exit `0` means current, `1` means updates exist, and `2` means an error. `--check` and `--dry-run` cannot be combined. `actup --version` prints the build version.
+**Lockfile mode** applies when `.github/workflows/actions.lock` already exists. Actup writes exact semantic version refs in workflows and maintains the immutable commits, repository IDs, and flattened transitive dependency graph in the existing lockfile:
 
-Actup reads `.actup.toml` from the repository root, or another file supplied with `--config <path>`. The only supported setting is:
+```yaml
+- uses: actions/checkout@v5.0.0
+```
+
+Actup does not create a lockfile in a legacy repository. It parses and validates existing lockfiles using GitHub's `actions-lockfile` Go package and emits schema v0.0.3. Composite Action dependencies are read from action metadata at the resolved commit. Actup resolves upstream transitive refs exactly as declared and does not upgrade them independently.
+
+External reusable workflows in `jobs.<job>.uses` are SHA-pinned directly in YAML in both modes, because the workflow dependency lockfile does not cover them. Local reusable workflows and Docker references are not included as Action lock dependencies.
+
+Local workspace actions (`./...`) are inspected transitively. If they reach a remote Action, lockfile mode fails because the lockfile cannot safely represent that workspace dependency. Legacy mode also fails conservatively for that case. Commit-bound same-repository actions (`$/...`) can contribute their remote dependencies to a lockfile.
+
+## Commands
+
+```text
+actup
+actup --check
+actup --dry-run
+actup --config <path>
+actup --version
+```
+
+`--check` writes nothing and exits 0 if current, 1 if source or lockfile changes are needed, and 2 for errors. `--dry-run` performs the analysis and reports changes without writing. Normal mode prepares the complete graph before writing files and restores prior file contents if a later write fails.
+
+## Configuration and authentication
+
+The optional `.actup.toml` contains exactly one setting:
 
 ```toml
 min-release-age = "24h"
 ```
 
-Use a positive whole number followed by `s`, `m`, `h`, `d`, or `w`. Unknown keys are errors. Set `GITHUB_TOKEN` in the environment for authenticated GitHub API requests.
+The default is 24 hours. Use a positive whole number followed by `s`, `m`, `h`, `d`, or `w`. Unknown keys are errors.
 
-## Workflow dependency lockfiles
+Set `GITHUB_TOKEN` for authenticated API access. It is optional for public repositories but recommended for rate limits and required when token permissions are needed for private repositories.
 
-If `.github/workflows/actions.lock` exists as a regular file, Actup detects lockfile mode. A normal `actup` run resolves dependencies and refuses to write if any updates are needed, because lockfile-aware application requires `gh actions-lock` integration. `--dry-run` reports chosen versions and indicates that reusable workflows still require SHA pinning. `--check` reports available dependency updates without writing, but does not validate the lockfile. Full lockfile integration is the next implementation milestone.
+## Security behavior
 
-Local actions, `$/` references, Docker actions, expressions, and unsupported multiline YAML syntax are left untouched. Actup does not create commits or pull requests.
+Actup stops if an existing lockfile's repository owner or repository ID changes, or if an exact semantic version tag moves to another commit. It does not write a partial graph or claim dynamic expressions are locked. Existing floating refs retain their locked commit when the upstream ref moves, with a warning. GitHub API lookups by the retained commit are required to succeed. Actup does not prove that a retained commit remains reachable from its floating ref; this API-only verification is a current limitation.
+
+Workflow edits preserve every byte outside dependency references and Actup-owned version comments. Actup does not use GitHub CLI, Node.js, Git subprocesses, or any other dependency manager.

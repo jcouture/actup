@@ -23,7 +23,6 @@ package github
 import (
 	"context"
 	"fmt"
-	"net/url"
 	"time"
 )
 
@@ -37,30 +36,19 @@ type gitObject struct {
 }
 
 // Resolve selects the newest eligible stable version and resolves its tag to a commit SHA.
-// When constraint is non-nil, only versions that satisfy it are considered.
 func (client *Client) Resolve(ctx context.Context, repository string, minimumAge time.Duration) (Target, error) {
 	candidate, err := client.latestTag(ctx, repository, minimumAge)
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve %s: %w", repository, err)
 	}
-	sha, err := client.resolveTag(ctx, repository, candidate.tag)
+	sha, err := client.ResolveRef(ctx, repository, candidate.tag)
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve %s: %w", repository, err)
 	}
 	return Target{Tag: candidate.tag, SHA: sha, Major: candidate.version.Major()}, nil
 }
 
-func (client *Client) resolveTag(ctx context.Context, repository, tag string) (string, error) {
-	owner, name, err := repositoryParts(repository)
-	if err != nil {
-		return "", err
-	}
-	var object gitObject
-	endpoint := fmt.Sprintf("/repos/%s/%s/git/ref/tags/%s", owner, name, url.PathEscape(tag))
-	if err := client.get(ctx, endpoint, &object); err != nil {
-		return "", err
-	}
-
+func (client *Client) dereferenceTag(ctx context.Context, owner, name, tag string, object gitObject) (string, error) {
 	seen := make(map[string]struct{})
 	for dereferences := 0; ; dereferences++ {
 		switch object.Object.Type {
@@ -82,7 +70,7 @@ func (client *Client) resolveTag(ctx context.Context, repository, tag string) (s
 			tagObjectSHA := object.Object.SHA
 			seen[tagObjectSHA] = struct{}{}
 			object = gitObject{}
-			endpoint = fmt.Sprintf("/repos/%s/%s/git/tags/%s", owner, name, tagObjectSHA)
+			endpoint := fmt.Sprintf("/repos/%s/%s/git/tags/%s", owner, name, tagObjectSHA)
 			if err := client.get(ctx, endpoint, &object); err != nil {
 				return "", err
 			}

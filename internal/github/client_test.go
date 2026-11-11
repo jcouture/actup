@@ -276,3 +276,25 @@ func writeTags(response http.ResponseWriter, count int, name string) {
 	}
 	response.Write([]byte("]"))
 }
+
+func TestActionMetadataSubpathAndYamlFallbackAtCommit(t *testing.T) {
+	const commit = "0123456789abcdef0123456789abcdef01234567"
+	var paths []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.URL.RequestURI())
+		if r.URL.Path == "/repos/acme/tools/contents/sub/path/action.yaml" && r.URL.Query().Get("ref") == commit {
+			fmt.Fprint(w, `{"encoding":"base64","content":"cnVuczoKICB1c2luZzogY29tcG9zaXRlCiAgc3RlcHM6IFtdCg=="}`)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	defer server.Close()
+	client := NewClient(ClientConfig{BaseURL: server.URL})
+	got, err := client.ActionMetadata(context.Background(), "acme/tools", "sub/path", commit)
+	if err != nil || !strings.Contains(string(got), "using: composite") {
+		t.Fatalf("metadata=%q error=%v", got, err)
+	}
+	if len(paths) != 2 || !strings.Contains(paths[0], "action.yml?ref="+commit) || !strings.Contains(paths[1], "action.yaml?ref="+commit) {
+		t.Fatalf("lookup paths=%v", paths)
+	}
+}

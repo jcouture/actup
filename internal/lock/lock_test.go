@@ -1,0 +1,71 @@
+// Copyright 2026 Jean-Philippe Couture
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy
+// of this software and associated documentation files (the "Software"), to deal
+// in the Software without restriction, including without limitation the rights
+// to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+// copies of the Software, and to permit persons to whom the Software is
+// furnished to do so, subject to the following conditions:
+//
+// The above copyright notice and this permission notice shall be included in all
+// copies or substantial portions of the Software.
+//
+// THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+// IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+// FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+// AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+// LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+// OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+// SOFTWARE.
+
+package lock
+
+import (
+	"bytes"
+	"os"
+	"testing"
+
+	"github.com/github/actions-lockfile/go/pkg/lockfile"
+)
+
+func TestGoldenDeterministicAndSemanticEquality(t *testing.T) {
+	f := lockfile.File{Version: lockfile.Version, Workflows: map[string][]string{".github/workflows/ci.yml": {"foo/build@v2.0.0", "actions/cache@v3"}}, Dependencies: map[string]lockfile.Action{
+		"foo/build@v2.0.0": {Ref: "v2.0.0", Commit: "sha1-0123456789abcdef0123456789abcdef01234567", OwnerID: 10, RepoID: 11, Uses: []string{"actions/cache@v3"}},
+		"actions/cache@v3": {Ref: "v3", Commit: "sha1-abcdef0123456789abcdef0123456789abcdef01", OwnerID: 20, RepoID: 21},
+	}}
+	want, err := os.ReadFile("testdata/simple.lock")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		got, err := Encode(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !bytes.Equal(got, want) {
+			t.Fatalf("generated:\n%s\nwant:\n%s", got, want)
+		}
+	}
+	parsed, err := Parse(want)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !Equal(parsed, f) {
+		t.Fatal("semantic comparison differs")
+	}
+	f.Dependencies["actions/cache@v3"] = lockfile.Action{Ref: "v3", Commit: "sha1-abcdef0123456789abcdef0123456789abcdef01", OwnerID: 20, RepoID: 999}
+	if Equal(parsed, f) {
+		t.Fatal("wrong repo ID accepted")
+	}
+}
+
+func TestOlderSupportedLockfileParsing(t *testing.T) {
+	source := []byte("version: v0.0.2\nworkflows:\n  .github/workflows/ci.yml:\n    - foo/build@v1\ndependencies:\n  foo/build@v1:\n    ref: v1\n    commit: sha1-0123456789abcdef0123456789abcdef01234567\n    owner_id: 10\n    repo_id: 11\n")
+	parsed, err := Parse(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Version != lockfile.Version || parsed.Dependencies["foo/build@v1"].RepoID != 11 {
+		t.Fatalf("parsed=%#v", parsed)
+	}
+}
