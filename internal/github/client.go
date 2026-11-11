@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package github resolves GitHub repository releases and tags through the API.
 package github
 
 import (
@@ -29,8 +28,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/rs/zerolog"
 )
 
 const defaultBaseURL = "https://api.github.com"
@@ -93,20 +90,11 @@ func (client *Client) get(ctx context.Context, endpoint string, target any) erro
 		request.Header.Set("Authorization", "Bearer "+client.token)
 	}
 
-	logger := zerolog.Ctx(ctx)
-	logger.Debug().Str("endpoint", endpoint).Msg("GET")
-
 	response, err := client.http.Do(request)
 	if err != nil {
 		return fmt.Errorf("GitHub API request failed: %w", err)
 	}
 	defer response.Body.Close()
-
-	event := logger.Debug().Int("status", response.StatusCode)
-	if remaining := response.Header.Get("X-RateLimit-Remaining"); remaining != "" {
-		event = event.Str("rate_limit_remaining", remaining)
-	}
-	event.Msg("response")
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		if (response.StatusCode == http.StatusForbidden || response.StatusCode == http.StatusTooManyRequests) &&

@@ -18,12 +18,12 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package update prepares and atomically writes surgical workflow edits.
 package update
 
 import (
 	"bytes"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -139,8 +139,10 @@ func WriteAtomic(path string, contents []byte) (returnErr error) {
 	if err := temporary.Chmod(info.Mode()); err != nil {
 		return fmt.Errorf("set mode on temporary file for %q: %w", path, err)
 	}
-	if _, err := temporary.Write(contents); err != nil {
+	if written, err := temporary.Write(contents); err != nil {
 		return fmt.Errorf("write temporary file for %q: %w", path, err)
+	} else if written != len(contents) {
+		return fmt.Errorf("write temporary file for %q: %w", path, io.ErrShortWrite)
 	}
 	if err := temporary.Close(); err != nil {
 		return fmt.Errorf("close temporary file for %q: %w", path, err)

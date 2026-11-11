@@ -44,7 +44,7 @@ func TestParseReference(t *testing.T) {
 		{
 			value: "org/repo/.github/workflows/build.yml@v2",
 			want: Reference{
-				Owner: "org", Repository: "repo", Subpath: ".github/workflows/build.yml", Ref: "v2",
+				Kind: ReusableWorkflow, Owner: "org", Repository: "repo", Subpath: ".github/workflows/build.yml", Ref: "v2",
 			},
 		},
 		{
@@ -141,7 +141,7 @@ func TestParseLine(t *testing.T) {
 			if !ok {
 				t.Fatal("ParseLine() rejected a valid line")
 			}
-			if got.Line != test.line || got.LineNumber != 17 ||
+			if got.LineNumber != 17 ||
 				!reflect.DeepEqual(got.Reference, test.want) || got.Comment != test.comment {
 				t.Errorf("ParseLine() = %#v", got)
 			}

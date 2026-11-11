@@ -18,13 +18,10 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package resolver resolves parsed action uses concurrently and reports changes.
 package resolver
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"regexp"
 	"sort"
 	"strconv"
@@ -32,146 +29,85 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/jcouture/actup/internal/action"
 	githubapi "github.com/jcouture/actup/internal/github"
-	"github.com/rs/zerolog"
 )
-
-const defaultConcurrency = 8
 
 var majorPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?)?$`)
 
-type client interface {
-	Resolve(context.Context, string, time.Duration, *semver.Constraints) (githubapi.Target, error)
-}
-
-// Occurrence associates a parsed use with its repository-relative file path.
 type Occurrence struct {
 	File string
 	Use  action.Use
 }
-
-// Result describes the target selected for one source occurrence.
 type Result struct {
 	Occurrence  Occurrence
 	Target      githubapi.Target
 	Current     string
 	Changed     bool
 	MajorChange bool
-	Warning     string
 }
+type Resolver struct{ client *githubapi.Client }
 
-// Resolver performs bounded, deduplicated repository resolution.
-type Resolver struct {
-	client        client
-	concurrency   int
-	pinConstraint func(string) *semver.Constraints
-}
+func New(client *githubapi.Client) *Resolver { return &Resolver{client: client} }
 
-// New creates a resolver with the default limit of eight concurrent repositories.
-// The pinConstraint function returns the semver constraint for a repository, or
-// nil when no pin applies.
-func New(apiClient *githubapi.Client, pinConstraint func(string) *semver.Constraints) *Resolver {
-	return &Resolver{client: apiClient, concurrency: defaultConcurrency, pinConstraint: pinConstraint}
-}
-
-// Resolve resolves every unique repository once and preserves occurrence order.
-func (resolver *Resolver) Resolve(ctx context.Context, occurrences []Occurrence, minimumAge time.Duration) ([]Result, error) {
+func (r *Resolver) Resolve(ctx context.Context, occurrences []Occurrence, age time.Duration, lockfile bool) ([]Result, error) {
 	occurrences = append([]Occurrence(nil), occurrences...)
-	sort.SliceStable(occurrences, func(left, right int) bool {
-		if occurrences[left].File != occurrences[right].File {
-			return occurrences[left].File < occurrences[right].File
+	sort.SliceStable(occurrences, func(i, j int) bool {
+		if occurrences[i].File != occurrences[j].File {
+			return occurrences[i].File < occurrences[j].File
 		}
-		return occurrences[left].Use.LineNumber < occurrences[right].Use.LineNumber
+		return occurrences[i].Use.LineNumber < occurrences[j].Use.LineNumber
 	})
-	repositories := make([]string, 0, len(occurrences))
-	canonical := make(map[string]string)
-	for _, occurrence := range occurrences {
-		repository := occurrence.Use.Reference.RepositoryID()
-		key := strings.ToLower(repository)
-		if _, exists := canonical[key]; !exists {
-			canonical[key] = repository
-			repositories = append(repositories, repository)
+	names := make(map[string]string)
+	var keys []string
+	for _, o := range occurrences {
+		name := o.Use.Reference.RepositoryID()
+		key := strings.ToLower(name)
+		if _, ok := names[key]; !ok {
+			names[key] = name
+			keys = append(keys, key)
 		}
 	}
-
-	logger := zerolog.Ctx(ctx)
-	ctx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	jobs := make(chan string, len(repositories))
-	for _, repository := range repositories {
-		jobs <- repository
-	}
-	close(jobs)
-
-	targets := make(map[string]githubapi.Target, len(repositories))
-	warnings := make(map[string]string)
+	targets := make(map[string]githubapi.Target, len(keys))
+	failures := make(map[string]error)
 	var mu sync.Mutex
-	workerCount := min(resolver.concurrency, len(repositories))
-	logger.Debug().Int("workers", workerCount).Int("repositories", len(repositories)).Msg("starting resolution")
-	errs := make(chan error, workerCount)
-	var workers sync.WaitGroup
-	for range workerCount {
-		workers.Go(func() {
-			for repository := range jobs {
-				logger.Debug().Str("repository", repository).Msg("resolving")
-				var constraint *semver.Constraints
-				if resolver.pinConstraint != nil {
-					constraint = resolver.pinConstraint(repository)
-				}
-				target, err := resolver.client.Resolve(ctx, repository, minimumAge, constraint)
-				if err != nil {
-					if constraint != nil && errors.Is(err, githubapi.ErrConstraintUnsatisfied) {
-						mu.Lock()
-						warnings[strings.ToLower(repository)] = fmt.Sprintf("no version of %s satisfies allow %q", repository, constraint)
-						mu.Unlock()
-						logger.Warn().Str("repository", repository).Msg("no version satisfies constraint")
-						continue
-					}
-					select {
-					case errs <- err:
-					default:
-					}
-					cancel()
-					return
-				}
-				logger.Debug().Str("repository", repository).Str("tag", target.Tag).Str("sha", target.SHA).Msg("resolved")
+	jobs := make(chan string)
+	var wg sync.WaitGroup
+	for range min(8, len(keys)) {
+		wg.Go(func() {
+			for key := range jobs {
+				target, err := r.client.Resolve(ctx, names[key], age)
 				mu.Lock()
-				targets[strings.ToLower(repository)] = target
+				if err != nil {
+					failures[key] = err
+				} else {
+					targets[key] = target
+				}
 				mu.Unlock()
 			}
 		})
 	}
-	workers.Wait()
-	close(errs)
-	if err := <-errs; err != nil {
-		return nil, err
+	for _, key := range keys {
+		jobs <- key
 	}
-
-	results := make([]Result, 0, len(occurrences))
-	for _, occurrence := range occurrences {
-		key := strings.ToLower(occurrence.Use.Reference.RepositoryID())
-		if warning, ok := warnings[key]; ok {
-			results = append(results, Result{
-				Occurrence: occurrence,
-				Current:    currentVersion(occurrence.Use),
-				Warning:    warning,
-			})
-			continue
+	close(jobs)
+	wg.Wait()
+	for _, key := range keys {
+		if err := failures[key]; err != nil {
+			return nil, err
 		}
-		target := targets[key]
-		current := currentVersion(occurrence.Use)
-		currentMajor, knownMajor := semanticMajor(current)
-		changed := !action.IsSHA(occurrence.Use.Reference.Ref) ||
-			!strings.EqualFold(occurrence.Use.Reference.Ref, target.SHA)
-		results = append(results, Result{
-			Occurrence:  occurrence,
-			Target:      target,
-			Current:     current,
-			Changed:     changed,
-			MajorChange: changed && knownMajor && currentMajor != target.Major,
-		})
+	}
+	results := make([]Result, 0, len(occurrences))
+	for _, o := range occurrences {
+		target := targets[strings.ToLower(o.Use.Reference.RepositoryID())]
+		current := currentVersion(o.Use)
+		oldMajor, known := semanticMajor(current)
+		ref := o.Use.Reference.Ref
+		changed := !action.IsSHA(ref) || !strings.EqualFold(ref, target.SHA)
+		if lockfile && o.Use.Reference.Kind == action.Action {
+			changed = ref != target.Tag
+		}
+		results = append(results, Result{Occurrence: o, Target: target, Current: current, Changed: changed, MajorChange: changed && known && oldMajor != target.Major})
 	}
 	return results, nil
 }
@@ -182,12 +118,11 @@ func currentVersion(use action.Use) string {
 	}
 	return use.Reference.Ref
 }
-
-func semanticMajor(value string) (uint64, bool) {
-	matches := majorPattern.FindStringSubmatch(value)
-	if matches == nil {
+func semanticMajor(s string) (uint64, bool) {
+	m := majorPattern.FindStringSubmatch(s)
+	if m == nil {
 		return 0, false
 	}
-	major, err := strconv.ParseUint(matches[1], 10, 64)
-	return major, err == nil
+	v, err := strconv.ParseUint(m[1], 10, 64)
+	return v, err == nil
 }

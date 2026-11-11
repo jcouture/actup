@@ -22,22 +22,17 @@ package github
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"regexp"
 	"strings"
 	"time"
 
 	"github.com/Masterminds/semver/v3"
-	"github.com/rs/zerolog"
 )
 
 const pageSize = 100
 
 var stableVersionPattern = regexp.MustCompile(`^v?[0-9]+\.[0-9]+\.[0-9]+$`)
-
-// ErrConstraintUnsatisfied is returned when no stable version satisfies a pin constraint.
-var ErrConstraintUnsatisfied = errors.New("no version satisfies pin constraint")
 
 type candidate struct {
 	tag     string
@@ -55,16 +50,14 @@ type tag struct {
 	Name string `json:"name"`
 }
 
-func (client *Client) latestTag(ctx context.Context, repository string, minimumAge time.Duration, constraint *semver.Constraints) (candidate, error) {
+func (client *Client) latestTag(ctx context.Context, repository string, minimumAge time.Duration) (candidate, error) {
 	owner, name, err := repositoryParts(repository)
 	if err != nil {
 		return candidate{}, err
 	}
-	logger := zerolog.Ctx(ctx)
 	cutoff := client.now().UTC().Add(-minimumAge)
 	var best candidate
 	for page := 1; ; page++ {
-		logger.Debug().Str("repository", repository).Int("page", page).Msg("fetching releases")
 		var releases []release
 		endpoint := fmt.Sprintf("/repos/%s/%s/releases?per_page=%d&page=%d", owner, name, pageSize, page)
 		if err := client.get(ctx, endpoint, &releases); err != nil {
@@ -84,9 +77,6 @@ func (client *Client) latestTag(ctx context.Context, repository string, minimumA
 			if release.PublishedAt.UTC().After(cutoff) {
 				continue
 			}
-			if constraint != nil && !constraint.Check(version) {
-				continue
-			}
 			best = higher(best, candidate{tag: release.TagName, version: version})
 		}
 		if len(releases) < pageSize {
@@ -96,11 +86,10 @@ func (client *Client) latestTag(ctx context.Context, repository string, minimumA
 	if best.version != nil {
 		return best, nil
 	}
-	logger.Debug().Str("repository", repository).Msg("no releases found, falling back to tags")
-	return client.latestRepositoryTag(ctx, owner, name, constraint)
+	return client.latestRepositoryTag(ctx, owner, name)
 }
 
-func (client *Client) latestRepositoryTag(ctx context.Context, owner, name string, constraint *semver.Constraints) (candidate, error) {
+func (client *Client) latestRepositoryTag(ctx context.Context, owner, name string) (candidate, error) {
 	var best candidate
 	for page := 1; ; page++ {
 		var tags []tag
@@ -113,9 +102,6 @@ func (client *Client) latestRepositoryTag(ctx context.Context, owner, name strin
 			if !ok {
 				continue
 			}
-			if constraint != nil && !constraint.Check(version) {
-				continue
-			}
 			best = higher(best, candidate{tag: tag.Name, version: version})
 		}
 		if len(tags) < pageSize {
@@ -123,9 +109,6 @@ func (client *Client) latestRepositoryTag(ctx context.Context, owner, name strin
 		}
 	}
 	if best.version == nil {
-		if constraint != nil {
-			return candidate{}, ErrConstraintUnsatisfied
-		}
 		return candidate{}, fmt.Errorf("no stable semantic tags or releases exist")
 	}
 	return best, nil

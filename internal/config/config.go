@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package config loads actup configuration files.
 package config
 
 import (
@@ -26,118 +25,47 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
-	pathpkg "path"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"time"
 
-	"github.com/Masterminds/semver/v3"
 	"github.com/pelletier/go-toml/v2"
 )
 
-const defaultMinReleaseAge = "24h"
-
-// Config is the effective actup configuration.
-type Config struct {
-	MinReleaseAge time.Duration
-	Ignore        []string
-	Allow         []AllowEntry
-}
-
-// AllowEntry pairs a glob pattern with a parsed semver constraint.
-type AllowEntry struct {
-	Pattern    string
-	Constraint *semver.Constraints
-}
-
+type Config struct{ MinReleaseAge time.Duration }
 type fileConfig struct {
-	MinReleaseAge string            `toml:"min-release-age"`
-	Ignore        []string          `toml:"ignore"`
-	Allow         map[string]string `toml:"allow"`
+	MinReleaseAge string `toml:"min-release-age"`
 }
 
-// Load reads the explicit configuration path, or .actup.toml under root when
-// path is empty. A missing default file is accepted.
 func Load(root, path string) (Config, error) {
 	explicit := path != ""
 	if !explicit {
 		path = filepath.Join(root, ".actup.toml")
 	}
-
-	var file *os.File
-	var err error
-	if explicit {
-		// #nosec G304 -- path is the value explicitly supplied through --config.
-		file, err = os.Open(path)
-	} else {
-		file, err = os.OpenInRoot(root, ".actup.toml")
-	}
+	file, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) && !explicit {
-		return defaults(), nil
+		return Config{24 * time.Hour}, nil
 	}
 	if err != nil {
 		return Config{}, fmt.Errorf("open config %q: %w", path, err)
 	}
 	defer file.Close()
-
-	decoded := fileConfig{MinReleaseAge: defaultMinReleaseAge}
+	decoded := fileConfig{MinReleaseAge: "24h"}
 	if err := toml.NewDecoder(file).DisallowUnknownFields().Decode(&decoded); err != nil {
 		return Config{}, fmt.Errorf("parse config %q: %w", path, err)
 	}
-	for index, pattern := range decoded.Ignore {
-		if _, err := pathpkg.Match(pattern, ""); err != nil {
-			return Config{}, fmt.Errorf("parse config %q: ignore[%d]: %w", path, index, err)
-		}
-	}
-
-	var allow []AllowEntry
-	for pattern, constraintStr := range decoded.Allow {
-		if _, err := pathpkg.Match(pattern, ""); err != nil {
-			return Config{}, fmt.Errorf("parse config %q: allow[%q]: %w", path, pattern, err)
-		}
-		constraint, err := semver.NewConstraint(constraintStr)
-		if err != nil {
-			return Config{}, fmt.Errorf("parse config %q: allow[%q]: invalid constraint %q", path, pattern, constraintStr)
-		}
-		allow = append(allow, AllowEntry{Pattern: pattern, Constraint: constraint})
-	}
-	sort.Slice(allow, func(i, j int) bool {
-		return allow[i].Pattern < allow[j].Pattern
-	})
-
-	minimumAge, err := parseDuration(decoded.MinReleaseAge)
+	age, err := parseDuration(decoded.MinReleaseAge)
 	if err != nil {
 		return Config{}, fmt.Errorf("parse config %q: min-release-age: %w", path, err)
 	}
-	return Config{MinReleaseAge: minimumAge, Ignore: decoded.Ignore, Allow: allow}, nil
-}
-
-// AllowConstraint returns the semver constraint for repository, or nil if no
-// allow pattern matches. When multiple patterns match, the longest pattern wins.
-func (cfg Config) AllowConstraint(repository string) *semver.Constraints {
-	var best *AllowEntry
-	for i := range cfg.Allow {
-		matched, _ := pathpkg.Match(cfg.Allow[i].Pattern, repository)
-		if matched && (best == nil || len(cfg.Allow[i].Pattern) > len(best.Pattern)) {
-			best = &cfg.Allow[i]
-		}
-	}
-	if best == nil {
-		return nil
-	}
-	return best.Constraint
-}
-
-func defaults() Config {
-	return Config{MinReleaseAge: 24 * time.Hour, Ignore: nil}
+	return Config{age}, nil
 }
 
 func parseDuration(value string) (time.Duration, error) {
+	invalid := func() (time.Duration, error) { return 0, fmt.Errorf("invalid duration %q", value) }
 	if len(value) < 2 {
-		return 0, fmt.Errorf("invalid duration %q", value)
+		return invalid()
 	}
-
 	var unit time.Duration
 	switch value[len(value)-1] {
 	case 's':
@@ -151,18 +79,17 @@ func parseDuration(value string) (time.Duration, error) {
 	case 'w':
 		unit = 7 * 24 * time.Hour
 	default:
-		return 0, fmt.Errorf("invalid duration %q", value)
+		return invalid()
 	}
-
 	number := value[:len(value)-1]
-	for _, character := range number {
-		if character < '0' || character > '9' {
-			return 0, fmt.Errorf("invalid duration %q", value)
+	for _, c := range number {
+		if c < '0' || c > '9' {
+			return invalid()
 		}
 	}
 	amount, err := strconv.ParseInt(number, 10, 64)
 	if err != nil || amount == 0 || amount > (1<<63-1)/int64(unit) {
-		return 0, fmt.Errorf("invalid duration %q", value)
+		return invalid()
 	}
 	return time.Duration(amount) * unit, nil
 }

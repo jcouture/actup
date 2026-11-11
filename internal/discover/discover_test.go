@@ -171,3 +171,23 @@ func writeFile(t *testing.T, path string) {
 		t.Fatalf("write file: %v", err)
 	}
 }
+
+func TestLockfileDetection(t *testing.T) {
+	root := t.TempDir()
+	dir := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	found, err := Lockfile(root)
+	if err != nil || found {
+		t.Fatalf("missing lockfile: %v, %v", found, err)
+	}
+	path := filepath.Join(dir, "actions.lock")
+	if err := os.WriteFile(path, []byte("lock"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	found, err = Lockfile(root)
+	if err != nil || !found {
+		t.Fatalf("regular lockfile: %v, %v", found, err)
+	}
+}
