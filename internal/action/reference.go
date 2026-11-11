@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package action parses external GitHub Action references from workflow lines.
 package action
 
 import (
@@ -30,7 +29,15 @@ import (
 )
 
 // Reference identifies an external GitHub Action or reusable workflow.
+type Kind uint8
+
+const (
+	Action Kind = iota
+	ReusableWorkflow
+)
+
 type Reference struct {
+	Kind       Kind
 	Owner      string
 	Repository string
 	Subpath    string
@@ -53,7 +60,6 @@ func (reference Reference) String() string {
 
 // Use records a parsed reference and its source line.
 type Use struct {
-	Line       string
 	LineNumber int
 	Reference  Reference
 	Comment    string
@@ -87,6 +93,7 @@ func ParseReference(value string) (Reference, bool) {
 		Repository: parts[1],
 		Subpath:    strings.Join(parts[2:], "/"),
 		Ref:        ref,
+		Kind:       classify(parts),
 	}, true
 }
 
@@ -114,7 +121,6 @@ func ParseLine(line string, lineNumber int) (Use, bool) {
 		return Use{}, false
 	}
 	return Use{
-		Line:       line,
 		LineNumber: lineNumber,
 		Reference:  reference,
 		Comment:    comment,
@@ -214,4 +220,11 @@ func invalidRefRune(character rune) bool {
 	return unicode.IsSpace(character) || character == '@' || character == '#' ||
 		character == ':' || character == '\\' || character == '~' || character == '^' ||
 		character == '?' || character == '*' || character == '['
+}
+
+func classify(parts []string) Kind {
+	if len(parts) == 5 && parts[2] == ".github" && parts[3] == "workflows" && (strings.HasSuffix(parts[4], ".yml") || strings.HasSuffix(parts[4], ".yaml")) && len(parts[4]) > 5 {
+		return ReusableWorkflow
+	}
+	return Action
 }

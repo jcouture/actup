@@ -27,493 +27,176 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestRootCommandPrintsReferencesGroupedByFile(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		tags := map[string]string{
-			"actions/checkout":             "v5.0.0",
-			"actions/setup-go":             "v6.1.0",
-			"goreleaser/goreleaser-action": "v7.0.0",
-		}
-		for repository, tag := range tags {
-			switch request.URL.Path {
-			case "/repos/" + repository + "/releases":
-				fmt.Fprintf(response, `[{"tag_name":%q,"published_at":"2020-01-01T00:00:00Z"}]`, tag)
-				return
-			case "/repos/" + repository + "/git/ref/tags/" + tag:
-				fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
-				return
-			}
-		}
-		http.NotFound(response, request)
-	}))
-	defer server.Close()
-	oldAPIURL := githubAPIURL
-	githubAPIURL = server.URL
-	t.Cleanup(func() { githubAPIURL = oldAPIURL })
+const sha = "0123456789abcdef0123456789abcdef01234567"
 
-	root := repository(t)
-	writeWorkflow(t, root, ".github/workflows/ci.yml", `jobs:
-  test:
-    steps:
-      - uses: actions/checkout@v4
-      - uses: ./.github/actions/build
-      - uses: actions/setup-go@v5
-`)
-	writeWorkflow(t, root, ".github/workflows/release.yml", `jobs:
-  release:
-    uses: goreleaser/goreleaser-action@v6.3.0
-`)
-
-	got := executeIn(t, root)
-	want := ".github/workflows/ci.yml\n\n" +
-		"  UPDATE  actions/checkout\n" +
-		"          v4 -> v5.0.0\n" +
-		"          warning: major version change\n\n" +
-		"  UPDATE  actions/setup-go\n" +
-		"          v5 -> v6.1.0\n" +
-		"          warning: major version change\n\n" +
-		".github/workflows/release.yml\n\n" +
-		"  UPDATE  goreleaser/goreleaser-action\n" +
-		"          v6.3.0 -> v7.0.0\n" +
-		"          warning: major version change\n\n" +
-		"Updated 3 references in 2 files.\n" +
-		"3 major version updates.\n"
-	if got != want {
-		t.Errorf("output = %q, want %q", got, want)
-	}
-	contents, err := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantFile := "jobs:\n  test:\n    steps:\n" +
-		"      - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.0\n" +
-		"      - uses: ./.github/actions/build\n" +
-		"      - uses: actions/setup-go@0123456789abcdef0123456789abcdef01234567 # v6.1.0\n"
-	if string(contents) != wantFile {
-		t.Errorf("workflow = %q, want %q", contents, wantFile)
-	}
-}
-
-func TestRootCommandDryRunAndCheckDoNotWrite(t *testing.T) {
-	server := currentReleaseServer(t)
-	defer server.Close()
-	oldAPIURL := githubAPIURL
-	githubAPIURL = server.URL
-	t.Cleanup(func() { githubAPIURL = oldAPIURL })
-
-	for _, test := range []struct {
-		name      string
-		flag      string
-		wantError bool
-		summary   string
-	}{
-		{name: "dry run", flag: "--dry-run", summary: "1 reference would be updated in 1 file.\n"},
-		{name: "check", flag: "--check", wantError: true, summary: "1 reference requires updates in 1 file.\n"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			root := repository(t)
-			original := "steps:\n  - uses: actions/checkout@v4\n"
-			writeWorkflow(t, root, ".github/workflows/ci.yml", original)
-			got, err := executeArgsIn(t, root, test.flag)
-			if (err != nil) != test.wantError {
-				t.Fatalf("Execute() error = %v", err)
-			}
-			if test.wantError && !IsCheckFailure(err) {
-				t.Fatalf("error = %v, want check failure", err)
-			}
-			if !bytes.Contains([]byte(got), []byte(test.summary)) {
-				t.Errorf("output = %q, want to contain %q", got, test.summary)
-			}
-			contents, readErr := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
-			if readErr != nil || string(contents) != original {
-				t.Errorf("workflow = %q, %v; want unchanged", contents, readErr)
-			}
-		})
-	}
-}
-
-func TestRootCommandRejectsConflictingModes(t *testing.T) {
-	root := repository(t)
-	_, err := executeArgsIn(t, root, "--check", "--dry-run")
-	if err == nil || err.Error() != "--check and --dry-run are mutually exclusive" {
-		t.Fatalf("Execute() error = %v", err)
-	}
-}
-
-func TestRootCommandFindsRepositoryFromNestedDirectory(t *testing.T) {
-	root := repository(t)
-	nested := filepath.Join(root, "a", "b")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-	if got := executeIn(t, nested); got != "All GitHub Actions are current.\n" {
-		t.Errorf("output = %q", got)
-	}
-}
-
-func TestRootCommandScansSpecifiedDirectory(t *testing.T) {
-	server := currentReleaseServer(t)
-	defer server.Close()
-	oldAPIURL := githubAPIURL
-	githubAPIURL = server.URL
-	t.Cleanup(func() { githubAPIURL = oldAPIURL })
-
-	workingDirectory := repository(t)
-	target := repository(t)
-	original := "steps:\n  - uses: actions/checkout@v4\n"
-	writeWorkflow(t, target, ".github/workflows/ci.yml", original)
-
-	got, err := executeArgsIn(t, workingDirectory, target)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if !bytes.Contains([]byte(got), []byte("Updated 1 reference in 1 file.\n")) {
-		t.Errorf("output = %q", got)
-	}
-	contents, readErr := os.ReadFile(filepath.Join(target, ".github/workflows/ci.yml"))
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	want := "steps:\n  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.0.0\n"
-	if string(contents) != want {
-		t.Errorf("workflow = %q, want %q", contents, want)
-	}
-}
-
-func TestRootCommandSpecifiedNestedDirectoryFindsRepository(t *testing.T) {
-	workingDirectory := repository(t)
-	target := repository(t)
-	nested := filepath.Join(target, "some", "directory")
-	if err := os.MkdirAll(nested, 0o755); err != nil {
-		t.Fatal(err)
-	}
-
-	got, err := executeArgsIn(t, workingDirectory, nested)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if want := "All GitHub Actions are current.\n"; got != want {
-		t.Errorf("output = %q, want %q", got, want)
-	}
-}
-
-func TestRootCommandRejectsInvalidScanDirectory(t *testing.T) {
-	workingDirectory := repository(t)
-	if _, err := executeArgsIn(t, workingDirectory, "missing"); err == nil {
-		t.Fatal("Execute() error = nil, want error")
-	}
-}
-
-func TestRootCommandWithoutReferences(t *testing.T) {
-	root := repository(t)
-	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: docker://alpine:latest\n")
-
-	if got, want := executeIn(t, root), "All GitHub Actions are current.\n"; got != want {
-		t.Errorf("output = %q, want %q", got, want)
-	}
-}
-
-func TestRootCommandLoadsConfiguration(t *testing.T) {
-	root := repository(t)
-	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("min-release-age = \"3d\"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-
-	if got, want := executeIn(t, root), "All GitHub Actions are current.\n"; got != want {
-		t.Errorf("output = %q, want %q", got, want)
-	}
-}
-
-func TestRootCommandConfigFlagOverridesDefault(t *testing.T) {
-	root := repository(t)
-	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("min-release-age = \"3d\"\n"), 0o644); err != nil {
-		t.Fatalf("write default config: %v", err)
-	}
-	explicit := filepath.Join(root, "other.toml")
-	if err := os.WriteFile(explicit, []byte("min-release-age = \"30m\"\n"), 0o644); err != nil {
-		t.Fatalf("write explicit config: %v", err)
-	}
-
-	got, err := executeArgsIn(t, root, "--config", explicit)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	if want := "All GitHub Actions are current.\n"; got != want {
-		t.Errorf("output = %q, want %q", got, want)
-	}
-}
-
-func TestRootCommandMissingExplicitConfigFails(t *testing.T) {
-	root := repository(t)
-	if _, err := executeArgsIn(t, root, "--config", filepath.Join(root, "missing.toml")); err == nil {
-		t.Fatal("Execute() error = nil, want error")
-	}
-}
-
-func TestRootCommandIgnoresActionsFromFlagAndConfig(t *testing.T) {
-	requests := make(chan string, 10)
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		requests <- request.URL.Path
-		switch request.URL.Path {
-		case "/repos/goreleaser/goreleaser-action/releases":
-			fmt.Fprint(response, `[{"tag_name":"v7.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
-		case "/repos/goreleaser/goreleaser-action/git/ref/tags/v7.0.0":
-			fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
-		default:
-			http.NotFound(response, request)
-		}
-	}))
-	defer server.Close()
-	oldAPIURL := githubAPIURL
-	githubAPIURL = server.URL
-	t.Cleanup(func() { githubAPIURL = oldAPIURL })
-
-	root := repository(t)
-	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("ignore = [\"actions/checkout\"]\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	original := "steps:\n" +
-		"  - uses: actions/checkout@v4\n" +
-		"  - uses: github/codeql-action/analyze@v3\n" +
-		"  - uses: goreleaser/goreleaser-action@v6.3.0\n"
-	writeWorkflow(t, root, ".github/workflows/ci.yml", original)
-
-	got, err := executeArgsIn(t, root, "--ignore", "github/*")
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
-	}
-	want := ".github/workflows/ci.yml\n\n" +
-		"  UPDATE  goreleaser/goreleaser-action\n" +
-		"          v6.3.0 -> v7.0.0\n" +
-		"          warning: major version change\n\n" +
-		"Updated 1 reference in 1 file.\n" +
-		"1 major version update.\n"
-	if got != want {
-		t.Errorf("output = %q, want %q", got, want)
-	}
-	contents, readErr := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
-	if readErr != nil {
-		t.Fatal(readErr)
-	}
-	wantFile := "steps:\n" +
-		"  - uses: actions/checkout@v4\n" +
-		"  - uses: github/codeql-action/analyze@v3\n" +
-		"  - uses: goreleaser/goreleaser-action@0123456789abcdef0123456789abcdef01234567 # v7.0.0\n"
-	if string(contents) != wantFile {
-		t.Errorf("workflow = %q, want %q", contents, wantFile)
-	}
-	close(requests)
-	for request := range requests {
-		if request != "/repos/goreleaser/goreleaser-action/releases" &&
-			request != "/repos/goreleaser/goreleaser-action/git/ref/tags/v7.0.0" {
-			t.Errorf("unexpected API request %q", request)
-		}
-	}
-}
-
-func TestRootCommandIgnoreInReadOnlyModes(t *testing.T) {
-	for _, test := range []struct {
-		name      string
-		flag      string
-		wantError bool
-		summary   string
-	}{
-		{name: "dry run", flag: "--dry-run", summary: "1 reference would be updated in 1 file.\n"},
-		{name: "check", flag: "--check", wantError: true, summary: "1 reference requires updates in 1 file.\n"},
-	} {
-		t.Run(test.name, func(t *testing.T) {
-			server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-				switch request.URL.Path {
-				case "/repos/goreleaser/goreleaser-action/releases":
-					fmt.Fprint(response, `[{"tag_name":"v7.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
-				case "/repos/goreleaser/goreleaser-action/git/ref/tags/v7.0.0":
-					fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
-				default:
-					http.NotFound(response, request)
-				}
-			}))
-			defer server.Close()
-			oldAPIURL := githubAPIURL
-			githubAPIURL = server.URL
-			t.Cleanup(func() { githubAPIURL = oldAPIURL })
-
-			root := repository(t)
-			original := "steps:\n" +
-				"  - uses: actions/checkout@v4\n" +
-				"  - uses: goreleaser/goreleaser-action@v6.3.0\n"
-			writeWorkflow(t, root, ".github/workflows/ci.yml", original)
-			got, err := executeArgsIn(t, root, test.flag, "--ignore", "actions/*")
-			if (err != nil) != test.wantError {
-				t.Fatalf("Execute() error = %v", err)
-			}
-			if test.wantError && !IsCheckFailure(err) {
-				t.Fatalf("error = %v, want check failure", err)
-			}
-			if !bytes.Contains([]byte(got), []byte(test.summary)) {
-				t.Errorf("output = %q, want to contain %q", got, test.summary)
-			}
-			if bytes.Contains([]byte(got), []byte("actions/checkout")) {
-				t.Errorf("output = %q, want ignored action omitted", got)
-			}
-			contents, readErr := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
-			if readErr != nil || string(contents) != original {
-				t.Errorf("workflow = %q, %v; want unchanged", contents, readErr)
-			}
-		})
-	}
-}
-
-func TestRootCommandAllowConstrainsVersion(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/repos/actions/checkout/releases":
-			fmt.Fprint(response, `[
-				{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"},
-				{"tag_name":"v5.2.0","published_at":"2020-01-01T00:00:00Z"},
-				{"tag_name":"v5.1.0","published_at":"2020-01-01T00:00:00Z"}
-			]`)
-		case "/repos/actions/checkout/git/ref/tags/v5.2.0":
-			fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
-		default:
-			http.NotFound(response, request)
-		}
-	}))
-	defer server.Close()
-	oldAPIURL := githubAPIURL
-	githubAPIURL = server.URL
-	t.Cleanup(func() { githubAPIURL = oldAPIURL })
-
-	root := repository(t)
-	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("[allow]\n\"actions/checkout\" = \"^5\"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: actions/checkout@v5\n")
-
-	got := executeIn(t, root)
-	want := ".github/workflows/ci.yml\n\n" +
-		"  PIN     actions/checkout\n" +
-		"          v5 -> v5.2.0\n\n" +
-		"Updated 1 reference in 1 file.\n"
-	if got != want {
-		t.Errorf("output = %q, want %q", got, want)
-	}
-
-	contents, err := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	wantFile := "steps:\n  - uses: actions/checkout@0123456789abcdef0123456789abcdef01234567 # v5.2.0\n"
-	if string(contents) != wantFile {
-		t.Errorf("workflow = %q, want %q", contents, wantFile)
-	}
-}
-
-func TestRootCommandAllowConstraintUnsatisfiedWarning(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/repos/actions/checkout/releases":
-			fmt.Fprint(response, `[{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
-		case "/repos/actions/checkout/tags":
-			fmt.Fprint(response, `[{"name":"v6.0.0"}]`)
-		default:
-			http.NotFound(response, request)
-		}
-	}))
-	defer server.Close()
-	oldAPIURL := githubAPIURL
-	githubAPIURL = server.URL
-	t.Cleanup(func() { githubAPIURL = oldAPIURL })
-
-	root := repository(t)
-	if err := os.WriteFile(filepath.Join(root, ".actup.toml"), []byte("[allow]\n\"actions/checkout\" = \"^5\"\n"), 0o644); err != nil {
-		t.Fatalf("write config: %v", err)
-	}
-	writeWorkflow(t, root, ".github/workflows/ci.yml", "steps:\n  - uses: actions/checkout@v5\n")
-
-	got := executeIn(t, root)
-	if !bytes.Contains([]byte(got), []byte("warning:")) {
-		t.Errorf("output = %q, want warning", got)
-	}
-	if !bytes.Contains([]byte(got), []byte("All GitHub Actions are current.")) {
-		t.Errorf("output = %q, want current message", got)
-	}
-
-	contents, err := os.ReadFile(filepath.Join(root, ".github/workflows/ci.yml"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(contents) != "steps:\n  - uses: actions/checkout@v5\n" {
-		t.Errorf("workflow should be unchanged, got %q", contents)
-	}
-}
-
-func TestRootCommandRejectsInvalidIgnorePattern(t *testing.T) {
-	root := repository(t)
-	_, err := executeArgsIn(t, root, "--ignore", "actions/[invalid")
-	if err == nil {
-		t.Fatal("Execute() error = nil, want error")
-	}
-}
-
-func TestFilterIgnoredRejectsInvalidPatternWithoutOccurrences(t *testing.T) {
-	if _, err := filterIgnored(nil, []string{"actions/[invalid"}); err == nil {
-		t.Fatal("filterIgnored() error = nil, want error")
-	}
-}
-
-func repository(t *testing.T) string {
+func setup(t *testing.T, lock bool) (string, string) {
 	t.Helper()
 	root := t.TempDir()
-	if err := os.Mkdir(filepath.Join(root, ".git"), 0o755); err != nil {
-		t.Fatalf("create .git directory: %v", err)
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0755); err != nil {
+		t.Fatal(err)
 	}
-	return root
-}
-
-func writeWorkflow(t *testing.T, root, name, contents string) {
-	t.Helper()
-	path := filepath.Join(root, filepath.FromSlash(name))
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		t.Fatalf("create workflow directory: %v", err)
+	dir := filepath.Join(root, ".github", "workflows")
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		t.Fatal(err)
 	}
-	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
-		t.Fatalf("write workflow: %v", err)
+	file := filepath.Join(dir, "ci.yml")
+	if err := os.WriteFile(file, []byte("- uses: actions/checkout@v4\n"), 0644); err != nil {
+		t.Fatal(err)
 	}
-}
-
-func executeIn(t *testing.T, root string) string {
-	t.Helper()
-	output, err := executeArgsIn(t, root)
-	if err != nil {
-		t.Fatalf("Execute() error = %v", err)
+	if lock {
+		if err := os.WriteFile(filepath.Join(dir, "actions.lock"), []byte("untouched"), 0644); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return output
-}
-
-func executeArgsIn(t *testing.T, root string, args ...string) (string, error) {
-	t.Helper()
-	t.Chdir(root)
-	var output bytes.Buffer
-	command := newRootCommand("test")
-	command.SetArgs(args)
-	command.SetOut(&output)
-	err := command.Execute()
-	return output.String(), err
-}
-
-func currentReleaseServer(t *testing.T) *httptest.Server {
-	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
-		switch request.URL.Path {
-		case "/repos/actions/checkout/releases":
-			fmt.Fprint(response, `[{"tag_name":"v5.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
-		case "/repos/actions/checkout/git/ref/tags/v5.0.0":
-			fmt.Fprint(response, `{"object":{"type":"commit","sha":"0123456789abcdef0123456789abcdef01234567"}}`)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/repos/actions/checkout/") {
+			http.NotFound(w, r)
+			return
+		}
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases"):
+			fmt.Fprint(w, `[{"tag_name":"v5.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+		case strings.HasSuffix(r.URL.Path, "/git/ref/tags/v5.0.0"):
+			fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, sha)
 		default:
-			http.NotFound(response, request)
+			http.NotFound(w, r)
 		}
 	}))
+	t.Cleanup(server.Close)
+	old := githubAPIURL
+	githubAPIURL = server.URL
+	t.Cleanup(func() { githubAPIURL = old })
+	return root, file
+}
+func run(t *testing.T, root string, args ...string) (string, error) {
+	t.Helper()
+	old, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(old)
+	cmd := newRootCommand("test")
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&out)
+	cmd.SetArgs(args)
+	err = cmd.Execute()
+	return out.String(), err
+}
+func TestLegacyIntegration(t *testing.T) {
+	root, file := setup(t, false)
+	out, err := run(t, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "- uses: actions/checkout@" + sha + " # v5.0.0\n"
+	if string(got) != want {
+		t.Fatalf("file = %q, want %q", got, want)
+	}
+	if !strings.Contains(out, "warning: major version change") {
+		t.Fatalf("output = %q", out)
+	}
+}
+func TestLockfileModes(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		exit int
+		want string
+	}{{"normal", nil, 2, "workflow dependency lockfile detected"}, {"dry run", []string{"--dry-run"}, 0, "Workflow dependency lockfile detected."}, {"check", []string{"--check"}, 1, "requires updates"}} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, file := setup(t, true)
+			before, _ := os.ReadFile(file)
+			out, err := run(t, root, tc.args...)
+			if tc.exit == 0 && err != nil {
+				t.Fatal(err)
+			}
+			if tc.exit != 0 && (err == nil || ExitCode(err) != tc.exit) {
+				t.Fatalf("error = %v", err)
+			}
+			if !strings.Contains(out+fmt.Sprint(err), tc.want) {
+				t.Fatalf("output = %q, err = %v", out, err)
+			}
+			after, _ := os.ReadFile(file)
+			if !bytes.Equal(before, after) {
+				t.Fatalf("workflow changed: %q", after)
+			}
+			lock, _ := os.ReadFile(filepath.Join(root, ".github", "workflows", "actions.lock"))
+			if string(lock) != "untouched" {
+				t.Fatalf("lockfile changed: %q", lock)
+			}
+		})
+	}
+}
+func TestUsage(t *testing.T) {
+	root, _ := setup(t, false)
+	for _, args := range [][]string{{"--check", "--dry-run"}, {"other"}, {"--yes"}} {
+		_, err := run(t, root, args...)
+		if err == nil {
+			t.Fatalf("%v accepted", args)
+		}
+	}
+}
+func TestNoFiles(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".git"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, root)
+	if err != nil || out != "No GitHub Actions files found.\n" {
+		t.Fatalf("output %q, error %v", out, err)
+	}
+}
+
+func TestLockfileCurrentNoOp(t *testing.T) {
+	root, file := setup(t, true)
+	if err := os.WriteFile(file, []byte("- uses: actions/checkout@v5.0.0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, root)
+	if err != nil || out != "All GitHub Actions are current.\n" {
+		t.Fatalf("output = %q, error = %v", out, err)
+	}
+	contents, err := os.ReadFile(file)
+	if err != nil || string(contents) != "- uses: actions/checkout@v5.0.0\n" {
+		t.Fatalf("workflow = %q, error = %v", contents, err)
+	}
+}
+
+func TestLockfileReusableWorkflowRequiresPin(t *testing.T) {
+	root, file := setup(t, true)
+	if err := os.WriteFile(file, []byte("jobs:\n  build:\n    uses: actions/checkout/.github/workflows/build.yml@v4\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := run(t, root, "--dry-run")
+	if err != nil || !strings.Contains(out, "reusable workflow: immutable SHA pinning required") {
+		t.Fatalf("output = %q, error = %v", out, err)
+	}
+}
+
+func TestResolutionFailureWritesNothing(t *testing.T) {
+	root, file := setup(t, false)
+	before := []byte("- uses: actions/checkout@v4\n- uses: missing/repository@v1\n")
+	if err := os.WriteFile(file, before, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	_, err := run(t, root)
+	if err == nil || !strings.Contains(err.Error(), "resolve missing/repository: GitHub API returned 404") {
+		t.Fatalf("error = %v", err)
+	}
+	after, err := os.ReadFile(file)
+	if err != nil || !bytes.Equal(before, after) {
+		t.Fatalf("workflow = %q, error = %v", after, err)
+	}
 }

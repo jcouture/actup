@@ -27,7 +27,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path"
 	"path/filepath"
 
 	"github.com/jcouture/actup/internal/action"
@@ -37,7 +36,6 @@ import (
 	"github.com/jcouture/actup/internal/output"
 	"github.com/jcouture/actup/internal/resolver"
 	"github.com/jcouture/actup/internal/update"
-	"github.com/rs/zerolog"
 	"github.com/spf13/cobra"
 )
 
@@ -49,91 +47,50 @@ type fileUpdate struct {
 	contents []byte
 }
 
-// Execute runs the actup root command with the supplied build version.
 func Execute(version string) error {
 	return newRootCommand(version).ExecuteContext(context.Background())
 }
-
-// ExitCode maps command results to the CLI's documented exit statuses.
 func ExitCode(err error) int {
 	if errors.Is(err, errUpdatesRequired) {
 		return 1
 	}
 	return 2
 }
-
-// IsCheckFailure reports whether check mode found available updates.
-func IsCheckFailure(err error) bool {
-	return errors.Is(err, errUpdatesRequired)
-}
+func IsCheckFailure(err error) bool { return errors.Is(err, errUpdatesRequired) }
 
 func newRootCommand(version string) *cobra.Command {
 	var configPath string
-	var dryRun bool
-	var check bool
-	var verbose bool
-	var ignorePatterns []string
-	command := &cobra.Command{
-		Use:           "actup [directory]",
-		Short:         "Pin GitHub Actions to current immutable commit SHAs",
-		Args:          cobra.MaximumNArgs(1),
-		Version:       version,
-		SilenceErrors: true,
-		SilenceUsage:  true,
-		RunE: func(command *cobra.Command, args []string) error {
+	var dryRun, check bool
+	command := &cobra.Command{Use: "actup", Short: "Update GitHub Actions dependencies", Args: cobra.NoArgs, Version: version, SilenceErrors: true, SilenceUsage: true,
+		RunE: func(command *cobra.Command, _ []string) error {
 			if dryRun && check {
 				return fmt.Errorf("--check and --dry-run are mutually exclusive")
 			}
-			ctx, cancel := context.WithCancel(command.Context())
-			defer cancel()
-
-			logger := zerolog.Nop()
-			if verbose {
-				logger = zerolog.New(zerolog.ConsoleWriter{
-					Out:             os.Stderr,
-					FormatTimestamp: func(any) string { return "" },
-				})
-			}
-			ctx = logger.WithContext(ctx)
-
 			if command.Flags().Changed("config") && configPath == "" {
 				return fmt.Errorf("--config requires a non-empty path")
 			}
-			start := "."
-			if len(args) == 1 {
-				start = args[0]
-			}
-			root, err := discover.RepositoryRootFrom(start)
+			root, err := discover.RepositoryRoot()
 			if err != nil {
 				return err
 			}
-			logger.Debug().Str("root", root).Msg("repository root")
-
-			configuration, err := config.Load(root, configPath)
+			cfg, err := config.Load(root, configPath)
 			if err != nil {
 				return err
 			}
-			logger.Debug().
-				Int("ignore", len(configuration.Ignore)).
-				Int("allow", len(configuration.Allow)).
-				Str("min_release_age", configuration.MinReleaseAge.String()).
-				Msg("configuration loaded")
-
-			for index, pattern := range ignorePatterns {
-				if _, err := path.Match(pattern, ""); err != nil {
-					return fmt.Errorf("--ignore[%d]: %w", index, err)
-				}
+			lockfile, err := discover.Lockfile(root)
+			if err != nil {
+				return err
 			}
-			configuration.Ignore = append(configuration.Ignore, ignorePatterns...)
-
 			files, err := discover.Files(root)
 			if err != nil {
 				return err
 			}
-			logger.Debug().Int("count", len(files)).Strs("files", files).Msg("workflow files discovered")
-
-			var occurrences []resolver.Occurrence
+			if len(files) == 0 {
+				fmt.Fprintln(command.OutOrStdout(), "No GitHub Actions files found.")
+				return nil
+			}
 			contentsByFile := make(map[string][]byte, len(files))
+			var occurrences []resolver.Occurrence
 			for _, file := range files {
 				opened, err := os.OpenInRoot(root, filepath.FromSlash(file))
 				if err != nil {
@@ -144,113 +101,69 @@ func newRootCommand(version string) *cobra.Command {
 				if readErr != nil {
 					return fmt.Errorf("read %q: %w", file, readErr)
 				}
-				uses, parseErr := action.Parse(bytes.NewReader(contents))
-				if parseErr != nil {
-					return fmt.Errorf("parse %q: %w", file, parseErr)
-				}
 				if closeErr != nil {
 					return fmt.Errorf("close %q: %w", file, closeErr)
 				}
-				logger.Debug().Str("file", file).Int("actions", len(uses)).Msg("parsed")
+				uses, err := action.Parse(bytes.NewReader(contents))
+				if err != nil {
+					return fmt.Errorf("parse %q: %w", file, err)
+				}
 				contentsByFile[file] = contents
 				for _, use := range uses {
 					occurrences = append(occurrences, resolver.Occurrence{File: file, Use: use})
 				}
 			}
-			before := len(occurrences)
-			occurrences, err = filterIgnored(occurrences, configuration.Ignore)
+			api := githubapi.NewClient(githubapi.ClientConfig{BaseURL: githubAPIURL, Token: os.Getenv("GITHUB_TOKEN")})
+			results, err := resolver.New(api).Resolve(command.Context(), occurrences, cfg.MinReleaseAge, lockfile)
 			if err != nil {
 				return err
 			}
-			if ignored := before - len(occurrences); ignored > 0 {
-				logger.Debug().Int("ignored", ignored).Msg("actions filtered by ignore patterns")
-			}
-
-			apiClient := githubapi.NewClient(githubapi.ClientConfig{
-				BaseURL: githubAPIURL,
-				Token:   os.Getenv("GITHUB_TOKEN"),
-			})
-			logger.Debug().Int("occurrences", len(occurrences)).Msg("resolving actions")
-			results, err := resolver.New(apiClient, configuration.AllowConstraint).Resolve(ctx, occurrences, configuration.MinReleaseAge)
-			if err != nil {
-				return err
-			}
-
-			prepared := make([]fileUpdate, 0, len(files))
+			var prepared []fileUpdate
+			changed := 0
 			for _, file := range files {
-				fileResults := resultsForFile(results, file)
-				if len(fileResults) == 0 {
+				var matching []resolver.Result
+				for _, result := range results {
+					if result.Changed && result.Occurrence.File == file {
+						matching = append(matching, result)
+						changed++
+					}
+				}
+				if len(matching) == 0 {
 					continue
 				}
-				contents, err := update.Prepare(contentsByFile[file], fileResults)
+				if lockfile {
+					continue
+				}
+				contents, err := update.Prepare(contentsByFile[file], matching)
 				if err != nil {
 					return fmt.Errorf("prepare %q: %w", file, err)
 				}
-				prepared = append(prepared, fileUpdate{path: filepath.Join(root, filepath.FromSlash(file)), contents: contents})
+				prepared = append(prepared, fileUpdate{filepath.Join(root, filepath.FromSlash(file)), contents})
 			}
-
 			mode := output.Normal
 			if dryRun {
 				mode = output.DryRun
 			} else if check {
 				mode = output.Check
 			}
+			if lockfile && !dryRun && !check && changed > 0 {
+				return fmt.Errorf("workflow dependency lockfile detected; lockfile-aware updates require gh actions-lock integration (use --dry-run or --check to inspect updates)")
+			}
 			if !dryRun && !check {
 				for _, file := range prepared {
-					logger.Debug().Str("path", file.path).Msg("writing file")
 					if err := update.WriteAtomic(file.path, file.contents); err != nil {
 						return err
 					}
 				}
 			}
-			changed := output.Print(command.OutOrStdout(), results, mode)
+			output.Print(command.OutOrStdout(), results, mode, lockfile)
 			if check && changed > 0 {
 				return errUpdatesRequired
 			}
 			return nil
-		},
-	}
+		}}
 	command.Flags().StringVar(&configPath, "config", "", "path to configuration file")
-	command.Flags().BoolVar(&dryRun, "dry-run", false, "print updates without writing files")
+	command.Flags().BoolVar(&dryRun, "dry-run", false, "show updates without writing files")
 	command.Flags().BoolVar(&check, "check", false, "exit 1 when updates are available")
-	command.Flags().BoolVarP(&verbose, "verbose", "v", false, "show diagnostic output on stderr")
-	command.Flags().StringArrayVar(&ignorePatterns, "ignore", nil, "action pattern to exclude (may be repeated)")
-
 	return command
-}
-
-func filterIgnored(occurrences []resolver.Occurrence, patterns []string) ([]resolver.Occurrence, error) {
-	for _, pattern := range patterns {
-		if _, err := path.Match(pattern, ""); err != nil {
-			return nil, fmt.Errorf("ignore pattern %q: %w", pattern, err)
-		}
-	}
-	filtered := make([]resolver.Occurrence, 0, len(occurrences))
-	for _, occurrence := range occurrences {
-		ignored := false
-		for _, pattern := range patterns {
-			matches, err := path.Match(pattern, occurrence.Use.Reference.RepositoryID())
-			if err != nil {
-				return nil, fmt.Errorf("ignore pattern %q: %w", pattern, err)
-			}
-			if matches {
-				ignored = true
-				break
-			}
-		}
-		if !ignored {
-			filtered = append(filtered, occurrence)
-		}
-	}
-	return filtered, nil
-}
-
-func resultsForFile(results []resolver.Result, file string) []resolver.Result {
-	var matching []resolver.Result
-	for _, result := range results {
-		if result.Changed && result.Occurrence.File == file {
-			matching = append(matching, result)
-		}
-	}
-	return matching
 }

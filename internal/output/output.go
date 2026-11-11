@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package output renders human-readable update reports.
 package output
 
 import (
@@ -41,18 +40,7 @@ const (
 
 // Print writes changed results and a mode-specific summary. It returns the
 // number of changed references.
-func Print(writer io.Writer, results []resolver.Result, mode Mode) int {
-	var warnings []string
-	warned := make(map[string]bool)
-	for _, result := range results {
-		if result.Warning != "" {
-			repo := result.Occurrence.Use.Reference.RepositoryID()
-			if !warned[repo] {
-				warned[repo] = true
-				warnings = append(warnings, result.Warning)
-			}
-		}
-	}
+func Print(writer io.Writer, results []resolver.Result, mode Mode, lockfile bool) int {
 
 	changed, files, majors := 0, 0, 0
 	currentFile := ""
@@ -72,11 +60,14 @@ func Print(writer io.Writer, results []resolver.Result, mode Mode) int {
 			fmt.Fprintln(writer)
 		}
 		kind := "UPDATE"
-		if isPin(result) {
+		if !lockfile && isPin(result) {
 			kind = "PIN"
 		}
 		fmt.Fprintf(writer, "  %-6s  %s\n", kind, result.Occurrence.Use.Reference.RepositoryID())
 		fmt.Fprintf(writer, "          %s -> %s\n", result.Current, result.Target.Tag)
+		if lockfile && result.Occurrence.Use.Reference.Kind == action.ReusableWorkflow {
+			fmt.Fprintln(writer, "          reusable workflow: immutable SHA pinning required")
+		}
 		if result.MajorChange {
 			fmt.Fprintln(writer, "          warning: major version change")
 			majors++
@@ -84,25 +75,12 @@ func Print(writer io.Writer, results []resolver.Result, mode Mode) int {
 		changed++
 	}
 
-	if changed == 0 && len(warnings) == 0 {
+	if changed == 0 {
 		fmt.Fprintln(writer, "All GitHub Actions are current.")
 		return 0
 	}
 
 	if changed > 0 {
-		fmt.Fprintln(writer)
-	}
-	for _, w := range warnings {
-		fmt.Fprintf(writer, "warning: %s\n", w)
-	}
-
-	if changed == 0 {
-		fmt.Fprintln(writer)
-		fmt.Fprintln(writer, "All GitHub Actions are current.")
-		return 0
-	}
-
-	if len(warnings) > 0 {
 		fmt.Fprintln(writer)
 	}
 	switch mode {
@@ -119,6 +97,10 @@ func Print(writer io.Writer, results []resolver.Result, mode Mode) int {
 	}
 	if majors > 0 {
 		fmt.Fprintf(writer, "%d major version %s.\n", majors, plural(majors, "update", "updates"))
+	}
+	if lockfile && mode == DryRun {
+		fmt.Fprintln(writer, "Workflow dependency lockfile detected.")
+		fmt.Fprintln(writer, "Lockfile-aware application is not available in this build.")
 	}
 	return changed
 }

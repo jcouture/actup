@@ -22,7 +22,6 @@ package github
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,8 +29,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/Masterminds/semver/v3"
 )
 
 const (
@@ -92,7 +89,7 @@ func TestReleaseSelectionFiltersAndMinimumAge(t *testing.T) {
 	defer closeServer()
 	client.now = func() time.Time { return now }
 
-	target, err := client.Resolve(context.Background(), "owner/repo", 24*time.Hour, nil)
+	target, err := client.Resolve(context.Background(), "owner/repo", 24*time.Hour)
 	if err != nil {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -117,7 +114,7 @@ func TestReleasePagination(t *testing.T) {
 		}
 	})
 	defer closeServer()
-	target, err := client.Resolve(context.Background(), "owner/repo", 0, nil)
+	target, err := client.Resolve(context.Background(), "owner/repo", 0)
 	if err != nil || target.Tag != "v2.0.0" || pages.Load() != 2 {
 		t.Fatalf("Resolve() = %#v, %v; pages = %d", target, err, pages.Load())
 	}
@@ -143,7 +140,7 @@ func TestTagFallbackFiltersAndPaginates(t *testing.T) {
 		}
 	})
 	defer closeServer()
-	target, err := client.Resolve(context.Background(), "owner/repo", 365*24*time.Hour, nil)
+	target, err := client.Resolve(context.Background(), "owner/repo", 365*24*time.Hour)
 	if err != nil || target.Tag != "v3.2.1" || pages.Load() != 2 {
 		t.Fatalf("Resolve() = %#v, %v; pages = %d", target, err, pages.Load())
 	}
@@ -163,7 +160,7 @@ func TestAnnotatedTagResolution(t *testing.T) {
 		}
 	})
 	defer closeServer()
-	target, err := client.Resolve(context.Background(), "owner/repo", 0, nil)
+	target, err := client.Resolve(context.Background(), "owner/repo", 0)
 	if err != nil || target.SHA != commitSHA {
 		t.Fatalf("Resolve() = %#v, %v", target, err)
 	}
@@ -178,7 +175,7 @@ func TestInvalidSHARejected(t *testing.T) {
 		}
 	})
 	defer closeServer()
-	_, err := client.Resolve(context.Background(), "owner/repo", 0, nil)
+	_, err := client.Resolve(context.Background(), "owner/repo", 0)
 	if err == nil || !strings.Contains(err.Error(), "resolve owner/repo") || !strings.Contains(err.Error(), "invalid commit SHA") {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -192,7 +189,7 @@ func TestHTTPFailuresIdentifyRepository(t *testing.T) {
 				fmt.Fprint(response, "body must not appear")
 			})
 			defer closeServer()
-			_, err := client.Resolve(context.Background(), "owner/repo", 0, nil)
+			_, err := client.Resolve(context.Background(), "owner/repo", 0)
 			want := fmt.Sprintf("resolve owner/repo: GitHub API returned %d", status)
 			if err == nil || err.Error() != want || strings.Contains(err.Error(), "body must not appear") {
 				t.Fatalf("Resolve() error = %v, want %q", err, want)
@@ -207,7 +204,7 @@ func TestRateLimitError(t *testing.T) {
 		response.WriteHeader(http.StatusForbidden)
 	})
 	defer closeServer()
-	_, err := client.Resolve(context.Background(), "owner/repo", 0, nil)
+	_, err := client.Resolve(context.Background(), "owner/repo", 0)
 	if err == nil || err.Error() != "resolve owner/repo: GitHub API rate limit exceeded" {
 		t.Fatalf("Resolve() error = %v", err)
 	}
@@ -242,87 +239,11 @@ func TestMalformedResponseAndMissingVersionsFail(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			client, closeServer := testClient(t, test.handler)
 			defer closeServer()
-			_, err := client.Resolve(context.Background(), "owner/repo", 0, nil)
+			_, err := client.Resolve(context.Background(), "owner/repo", 0)
 			if err == nil || !strings.Contains(err.Error(), "resolve owner/repo") || !strings.Contains(err.Error(), test.contains) {
 				t.Fatalf("Resolve() error = %v", err)
 			}
 		})
-	}
-}
-
-func TestConstraintFiltersReleases(t *testing.T) {
-	client, closeServer := testClient(t, func(response http.ResponseWriter, request *http.Request) {
-		switch {
-		case strings.HasSuffix(request.URL.Path, "/releases"):
-			fmt.Fprint(response, `[
-				{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"},
-				{"tag_name":"v5.2.0","published_at":"2020-01-01T00:00:00Z"},
-				{"tag_name":"v5.1.0","published_at":"2020-01-01T00:00:00Z"},
-				{"tag_name":"v4.0.0","published_at":"2020-01-01T00:00:00Z"}
-			]`)
-		case strings.HasSuffix(request.URL.Path, "/git/ref/tags/v5.2.0"):
-			fmt.Fprintf(response, `{"object":{"type":"commit","sha":%q}}`, commitSHA)
-		default:
-			http.NotFound(response, request)
-		}
-	})
-	defer closeServer()
-
-	constraint, _ := semver.NewConstraint("^5")
-	target, err := client.Resolve(context.Background(), "owner/repo", 0, constraint)
-	if err != nil {
-		t.Fatalf("Resolve() error = %v", err)
-	}
-	if target.Tag != "v5.2.0" || target.Major != 5 {
-		t.Errorf("Resolve() = %#v, want v5.2.0", target)
-	}
-}
-
-func TestConstraintFiltersTags(t *testing.T) {
-	client, closeServer := testClient(t, func(response http.ResponseWriter, request *http.Request) {
-		switch {
-		case strings.HasSuffix(request.URL.Path, "/releases"):
-			fmt.Fprint(response, `[]`)
-		case strings.HasSuffix(request.URL.Path, "/tags"):
-			fmt.Fprint(response, `[{"name":"v3.0.0"},{"name":"v2.5.0"},{"name":"v1.0.0"}]`)
-		case strings.HasSuffix(request.URL.Path, "/git/ref/tags/v2.5.0"):
-			fmt.Fprintf(response, `{"object":{"type":"commit","sha":%q}}`, commitSHA)
-		default:
-			http.NotFound(response, request)
-		}
-	})
-	defer closeServer()
-
-	constraint, _ := semver.NewConstraint("~2.5")
-	target, err := client.Resolve(context.Background(), "owner/repo", 0, constraint)
-	if err != nil {
-		t.Fatalf("Resolve() error = %v", err)
-	}
-	if target.Tag != "v2.5.0" {
-		t.Errorf("Resolve() = %#v, want v2.5.0", target)
-	}
-}
-
-func TestConstraintUnsatisfiedError(t *testing.T) {
-	client, closeServer := testClient(t, func(response http.ResponseWriter, request *http.Request) {
-		switch {
-		case strings.HasSuffix(request.URL.Path, "/releases"):
-			fmt.Fprint(response, `[{"tag_name":"v6.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
-		case strings.HasSuffix(request.URL.Path, "/tags"):
-			fmt.Fprint(response, `[{"name":"v6.0.0"}]`)
-		default:
-			http.NotFound(response, request)
-		}
-	})
-	defer closeServer()
-
-	constraint, _ := semver.NewConstraint("^5")
-	_, err := client.Resolve(context.Background(), "owner/repo", 0, constraint)
-	if err == nil {
-		t.Fatal("Resolve() error = nil, want error")
-	}
-	if !errors.Is(err, ErrConstraintUnsatisfied) {
-		t.Errorf("Resolve() error = %v, want ErrConstraintUnsatisfied", err)
 	}
 }
 

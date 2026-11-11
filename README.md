@@ -1,161 +1,34 @@
 # actup
 
-Actup updates external GitHub Actions to the latest eligible stable release and pins them to immutable commit SHAs. It preserves workflow formatting and comments, warns about major upgrades, and supports dry-run and CI check modes.
-
-```yaml
-# Before
-- uses: actions/checkout@v5
-
-# After
-- uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-```
-
-The SHA is resolved from GitHub; the value above is only an example.
-
-## Install
-
-### Homebrew (macOS)
-
-```bash
-brew install --cask jcouture/tap/actup
-```
-
-### Go
-
-```bash
-go install github.com/jcouture/actup@latest
-```
-
-### Build from source
-
-To build from source with the Go version pinned in `mise.toml`:
-
-```bash
-git clone https://github.com/jcouture/actup.git
-cd actup
-mise install
-make build
-```
-
-The binary is written to `bin/actup`.
-
-### Verify a release archive
-
-Download the archive, `checksums.txt`, and `checksums.txt.sigstore.json` from the same [GitHub release](https://github.com/jcouture/actup/releases). Verify the signed checksums with [Cosign](https://github.com/sigstore/cosign) and the committed [public key](cosign.pub):
-
-```bash
-cosign verify-blob \
-  --key https://raw.githubusercontent.com/jcouture/actup/main/cosign.pub \
-  --bundle checksums.txt.sigstore.json \
-  checksums.txt
-```
-
-Then compare your archive's SHA-256 hash with its entry in `checksums.txt`.
-
-## Use
-
-Run Actup anywhere inside a Git repository:
+Actup updates external GitHub Actions dependencies in a Git repository. Run it from any directory inside the working tree:
 
 ```bash
 actup
 ```
 
-Pass a directory to target another repository:
+It scans workflow files directly under `.github/workflows`, action definitions under `.github/actions`, and root `action.yml` or `action.yaml`. It selects the newest eligible stable, complete semantic version from GitHub Releases, then falls back to tags if no eligible release exists. Releases must be at least 24 hours old by default; tag-only results have no publication date, so that age policy cannot apply to them.
 
-```bash
-actup ../another-repository
+In repositories without `.github/workflows/actions.lock`, Actup automatically replaces external action and reusable workflow refs with the resolved full commit SHA. It adds a version comment when there is no comment, replaces an Actup-owned version comment, and preserves human comments. It preserves unrelated file bytes and warns when the old and new semantic major versions differ. Major updates are applied automatically.
+
+```yaml
+# Before
+- uses: actions/checkout@v4
+# After (example SHA)
+- uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
 ```
 
-Preview changes without writing files:
+Use `actup --dry-run` to preview without writing. Use `actup --check` in CI: exit `0` means current, `1` means updates exist, and `2` means an error. `--check` and `--dry-run` cannot be combined. `actup --version` prints the build version.
 
-```bash
-actup --dry-run
-```
-
-Check for updates in CI:
-
-```bash
-actup --check
-```
-
-Check mode does not write files. It exits `1` when updates are available, `0` when everything is current, and `2` on error. `--check` and `--dry-run` cannot be combined.
-
-Set `GITHUB_TOKEN` for private repository access or higher API rate limits:
-
-```bash
-export GITHUB_TOKEN='github_pat_your_token_here'
-```
-
-## Configuration
-
-Actup reads `.actup.toml` from the repository root. Releases must be at least 24 hours old by default.
+Actup reads `.actup.toml` from the repository root, or another file supplied with `--config <path>`. The only supported setting is:
 
 ```toml
-min-release-age = "3d"
-ignore = [
-  "actions/checkout",
-  "myorg/internal-*",
-]
+min-release-age = "24h"
 ```
 
-Durations accept positive whole numbers followed by `s`, `m`, `h`, `d`, or `w`. Ignore patterns use Go path-style matching against `owner/repository`.
+Use a positive whole number followed by `s`, `m`, `h`, `d`, or `w`. Unknown keys are errors. Set `GITHUB_TOKEN` in the environment for authenticated GitHub API requests.
 
-Use another config file or add command-line exclusions with:
+## Workflow dependency lockfiles
 
-```bash
-actup --config config/actup.toml
-actup --ignore 'actions/*' --ignore 'github/codeql-action'
-```
+If `.github/workflows/actions.lock` exists as a regular file, Actup detects lockfile mode. A normal `actup` run resolves dependencies and refuses to write if any updates are needed, because lockfile-aware application requires `gh actions-lock` integration. `--dry-run` reports chosen versions and indicates that reusable workflows still require SHA pinning. `--check` reports available dependency updates without writing, but does not validate the lockfile. Full lockfile integration is the next implementation milestone.
 
-Command-line exclusions are added to those in the config file.
-
-### Allow
-
-The `[allow]` table constrains which versions Actup may select for specific actions. Allowed actions are still updated and SHA-pinned, but only to versions that satisfy the constraint.
-
-```toml
-[allow]
-"actions/checkout" = "^5"            # minor + patch updates within v5
-"actions/setup-node" = "~4.1"        # patch updates to 4.1.x only
-"aws-actions/*" = ">= 2, < 4"       # explicit range
-"actions/upload-artifact" = "4.1.0"  # exact version
-```
-
-Keys are action patterns using the same glob syntax as `ignore`. Values are [semver constraints](https://github.com/Masterminds/semver#checking-version-constraints):
-
-| Syntax | Meaning |
-|--------|---------|
-| `^5` or `^5.2.1` | Same major, any minor and patch |
-| `~4.1` or `~4.1.3` | Same major.minor, patches only |
-| `4.1.0` | Exact version |
-| `>= 2, < 4` | Explicit range |
-
-When multiple patterns match the same action, the longest pattern wins. Ignored actions take priority over allowed actions. If no version satisfies an allow constraint, Actup prints a warning and leaves the action unchanged.
-
-## Scope
-
-Actup scans:
-
-- `.github/workflows/*.yml` and `.github/workflows/*.yaml`
-- `.github/actions/**/action.yml` and `.github/actions/**/action.yaml`
-- Root-level `action.yml` and `action.yaml`
-
-It supports external actions, action subpaths, and reusable workflows. It ignores local and Docker actions, expressions, multiline YAML values, anchors, aliases, and symlinks.
-
-Only stable semantic versions are selected. GitHub Releases are preferred, with tags used as a fallback. The release-age setting cannot apply to tag-only releases because tags have no publication timestamp.
-
-## Development
-
-```bash
-make test       # unit tests
-make build      # build bin/actup
-make precommit  # format, analyze, scan, and test
-```
-
-Run `make help` for all targets. Issues and pull requests are welcome on [GitHub](https://github.com/jcouture/actup).
-
-Maintainers can find the tag-driven release procedure in [docs/RELEASE.md](docs/RELEASE.md).
-
-## License
-
-[MIT](LICENSE)
+Local actions, `$/` references, Docker actions, expressions, and unsupported multiline YAML syntax are left untouched. Actup does not create commits or pull requests.

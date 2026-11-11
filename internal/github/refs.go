@@ -25,9 +25,6 @@ import (
 	"fmt"
 	"net/url"
 	"time"
-
-	"github.com/Masterminds/semver/v3"
-	"github.com/rs/zerolog"
 )
 
 const maximumTagDereferences = 8
@@ -41,18 +38,15 @@ type gitObject struct {
 
 // Resolve selects the newest eligible stable version and resolves its tag to a commit SHA.
 // When constraint is non-nil, only versions that satisfy it are considered.
-func (client *Client) Resolve(ctx context.Context, repository string, minimumAge time.Duration, constraint *semver.Constraints) (Target, error) {
-	logger := zerolog.Ctx(ctx)
-	candidate, err := client.latestTag(ctx, repository, minimumAge, constraint)
+func (client *Client) Resolve(ctx context.Context, repository string, minimumAge time.Duration) (Target, error) {
+	candidate, err := client.latestTag(ctx, repository, minimumAge)
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve %s: %w", repository, err)
 	}
-	logger.Debug().Str("repository", repository).Str("tag", candidate.tag).Msg("selected candidate")
 	sha, err := client.resolveTag(ctx, repository, candidate.tag)
 	if err != nil {
 		return Target{}, fmt.Errorf("resolve %s: %w", repository, err)
 	}
-	logger.Debug().Str("repository", repository).Str("sha", sha).Msg("resolved tag")
 	return Target{Tag: candidate.tag, SHA: sha, Major: candidate.version.Major()}, nil
 }
 

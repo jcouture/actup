@@ -98,6 +98,20 @@ func TestUnsupportedUsesFormsRemainUntouched(t *testing.T) {
 	}
 }
 
+func TestPrepareReusableWorkflow(t *testing.T) {
+	input := "jobs:\n  build:\n    uses: org/repo/.github/workflows/build.yml@v2\n"
+	use, ok := action.ParseLine("    uses: org/repo/.github/workflows/build.yml@v2", 3)
+	if !ok || use.Reference.Kind != action.ReusableWorkflow {
+		t.Fatalf("reusable workflow parsing = %#v, %v", use, ok)
+	}
+	result := resolver.Result{Occurrence: resolver.Occurrence{Use: use}, Target: githubapi.Target{Tag: "v3.0.0", SHA: targetSHA}, Changed: true}
+	got, err := Prepare([]byte(input), []resolver.Result{result})
+	want := "jobs:\n  build:\n    uses: org/repo/.github/workflows/build.yml@" + targetSHA + " # v3.0.0\n"
+	if err != nil || string(got) != want {
+		t.Fatalf("Prepare() = %q, %v; want %q", got, err, want)
+	}
+}
+
 func TestWriteAtomicPreservesMode(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "workflow.yml")
 	if err := os.WriteFile(path, []byte("old"), 0o640); err != nil {

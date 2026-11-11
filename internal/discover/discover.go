@@ -18,7 +18,6 @@
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 // SOFTWARE.
 
-// Package discover locates a Git repository root and its GitHub Actions files.
 package discover
 
 import (
@@ -225,4 +224,9 @@ func relativePath(root, path string) (string, error) {
 		return "", fmt.Errorf("make %q relative to repository root: %w", path, err)
 	}
 	return filepath.ToSlash(relative), nil
+}
+
+// Lockfile reports whether the workflow dependency lockfile is a regular file.
+func Lockfile(root string) (bool, error) {
+	return isRegularFile(filepath.Join(root, ".github", "workflows", "actions.lock"))
 }
