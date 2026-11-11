@@ -66,7 +66,7 @@ func Print(writer io.Writer, results []resolver.Result, mode Mode, lockfile bool
 		fmt.Fprintf(writer, "  %-6s  %s\n", kind, result.Occurrence.Use.Reference.RepositoryID())
 		fmt.Fprintf(writer, "          %s -> %s\n", result.Current, result.Target.Tag)
 		if lockfile && result.Occurrence.Use.Reference.Kind == action.ReusableWorkflow {
-			fmt.Fprintln(writer, "          reusable workflow: immutable SHA pinning required")
+			fmt.Fprintf(writer, "          pinned to %s\n", result.Target.SHA)
 		}
 		if result.MajorChange {
 			fmt.Fprintln(writer, "          warning: major version change")
@@ -76,7 +76,9 @@ func Print(writer io.Writer, results []resolver.Result, mode Mode, lockfile bool
 	}
 
 	if changed == 0 {
-		fmt.Fprintln(writer, "All GitHub Actions are current.")
+		if !lockfile {
+			fmt.Fprintln(writer, "All GitHub Actions are current.")
+		}
 		return 0
 	}
 
@@ -97,10 +99,6 @@ func Print(writer io.Writer, results []resolver.Result, mode Mode, lockfile bool
 	}
 	if majors > 0 {
 		fmt.Fprintf(writer, "%d major version %s.\n", majors, plural(majors, "update", "updates"))
-	}
-	if lockfile && mode == DryRun {
-		fmt.Fprintln(writer, "Workflow dependency lockfile detected.")
-		fmt.Fprintln(writer, "Lockfile-aware application is not available in this build.")
 	}
 	return changed
 }

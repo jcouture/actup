@@ -36,8 +36,9 @@ import (
 var majorPattern = regexp.MustCompile(`^v?(0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*))?)?$`)
 
 type Occurrence struct {
-	File string
-	Use  action.Use
+	File   string
+	Use    action.Use
+	Offset int
 }
 type Result struct {
 	Occurrence  Occurrence
@@ -55,6 +56,9 @@ func (r *Resolver) Resolve(ctx context.Context, occurrences []Occurrence, age ti
 	sort.SliceStable(occurrences, func(i, j int) bool {
 		if occurrences[i].File != occurrences[j].File {
 			return occurrences[i].File < occurrences[j].File
+		}
+		if occurrences[i].Offset != occurrences[j].Offset && occurrences[i].Offset > 0 && occurrences[j].Offset > 0 {
+			return occurrences[i].Offset < occurrences[j].Offset
 		}
 		return occurrences[i].Use.LineNumber < occurrences[j].Use.LineNumber
 	})
@@ -105,7 +109,7 @@ func (r *Resolver) Resolve(ctx context.Context, occurrences []Occurrence, age ti
 		ref := o.Use.Reference.Ref
 		changed := !action.IsSHA(ref) || !strings.EqualFold(ref, target.SHA)
 		if lockfile && o.Use.Reference.Kind == action.Action {
-			changed = ref != target.Tag
+			changed = ref != target.Tag && !(action.IsSHA(ref) && strings.EqualFold(ref, target.SHA) && current == target.Tag)
 		}
 		results = append(results, Result{Occurrence: o, Target: target, Current: current, Changed: changed, MajorChange: changed && known && oldMajor != target.Major})
 	}

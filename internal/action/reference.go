@@ -21,9 +21,6 @@
 package action
 
 import (
-	"bufio"
-	"fmt"
-	"io"
 	"strings"
 	"unicode"
 )
@@ -97,53 +94,6 @@ func ParseReference(value string) (Reference, bool) {
 	}, true
 }
 
-// ParseLine parses a supported uses line at a one-based source line number.
-func ParseLine(line string, lineNumber int) (Use, bool) {
-	content := strings.TrimLeftFunc(line, unicode.IsSpace)
-	if strings.HasPrefix(content, "#") {
-		return Use{}, false
-	}
-	if strings.HasPrefix(content, "-") {
-		content = content[1:]
-		trimmed := strings.TrimLeftFunc(content, unicode.IsSpace)
-		if len(trimmed) == len(content) {
-			return Use{}, false
-		}
-		content = trimmed
-	}
-	if !strings.HasPrefix(content, "uses:") {
-		return Use{}, false
-	}
-
-	value, comment := splitComment(strings.TrimSpace(content[len("uses:"):]))
-	reference, ok := ParseReference(value)
-	if !ok {
-		return Use{}, false
-	}
-	return Use{
-		LineNumber: lineNumber,
-		Reference:  reference,
-		Comment:    comment,
-	}, true
-}
-
-// Parse reads lines and returns all supported external references.
-func Parse(reader io.Reader) ([]Use, error) {
-	scanner := bufio.NewScanner(reader)
-	scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-	var uses []Use
-	for lineNumber := 1; scanner.Scan(); lineNumber++ {
-		if use, ok := ParseLine(scanner.Text(), lineNumber); ok {
-			uses = append(uses, use)
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("scan action references: %w", err)
-	}
-	return uses, nil
-}
-
 // IsSHA reports whether ref is a full 40-character hexadecimal commit SHA.
 func IsSHA(ref string) bool {
 	if len(ref) != 40 {
@@ -181,17 +131,6 @@ func IsVersionAnnotation(comment string) bool {
 		}
 	}
 	return true
-}
-
-func splitComment(value string) (string, string) {
-	previousWhitespace := false
-	for index, character := range value {
-		if character == '#' && (index == 0 || previousWhitespace) {
-			return strings.TrimSpace(value[:index]), value[index:]
-		}
-		previousWhitespace = unicode.IsSpace(character)
-	}
-	return strings.TrimSpace(value), ""
 }
 
 func validRepositoryPart(part string) bool {
