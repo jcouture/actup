@@ -50,6 +50,9 @@ type Client struct {
 	mu         sync.Mutex
 	identities map[string]Identity
 	refs       map[string]string
+	commits    map[string]bool
+	reachable  map[string]bool
+	metadata   map[string][]byte
 }
 
 // Target is the selected stable version and the commit to which its tag points.
@@ -78,6 +81,9 @@ func NewClient(configuration ClientConfig) *Client {
 		now:        now,
 		identities: make(map[string]Identity),
 		refs:       make(map[string]string),
+		commits:    make(map[string]bool),
+		reachable:  make(map[string]bool),
+		metadata:   make(map[string][]byte),
 	}
 }
 

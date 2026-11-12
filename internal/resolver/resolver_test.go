@@ -168,6 +168,24 @@ func TestDeduplicatesAndOrdersConcurrentResolution(t *testing.T) {
 	}
 }
 
+func TestLockfileCurrentFloatingRefIsNotCosmeticallyRewritten(t *testing.T) {
+	api, closeServer := resolverAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/releases"):
+			fmt.Fprint(w, `[{"tag_name":"v5.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+		case strings.HasSuffix(r.URL.Path, "/git/ref/tags/v5.0.0"), strings.HasSuffix(r.URL.Path, "/git/ref/tags/v5"):
+			commit(w, resolvedSHA)
+		default:
+			http.NotFound(w, r)
+		}
+	})
+	defer closeServer()
+	results, err := New(api).Resolve(context.Background(), []Occurrence{occurrence("ci.yml", 1, "owner/repo", "v5", "")}, 0, true)
+	if err != nil || len(results) != 1 || results[0].Changed {
+		t.Fatalf("results=%#v, error=%v", results, err)
+	}
+}
+
 func occurrence(file string, line int, repository, ref, comment string) Occurrence {
 	owner, name, _ := strings.Cut(repository, "/")
 	return Occurrence{File: file, Use: action.Use{

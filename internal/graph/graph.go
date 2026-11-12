@@ -59,6 +59,9 @@ func VerifyExisting(ctx context.Context, api *github.Client, existing lockfile.F
 			return fmt.Errorf("invalid locked dependency %q", key)
 		}
 		old := existing.Dependencies[key]
+		if old.Hostname != "" && old.Hostname != "github.com" {
+			return fmt.Errorf("verify %s: unsupported GitHub host %q", key, old.Hostname)
+		}
 		id, err := api.Repository(ctx, pin.NWO)
 		if err != nil {
 			return fmt.Errorf("verify %s: %w", key, err)
@@ -68,10 +71,24 @@ func VerifyExisting(ctx context.Context, api *github.Client, existing lockfile.F
 		}
 		sha, err := api.ResolveRef(ctx, pin.NWO, pin.Ref)
 		if err != nil {
-			return fmt.Errorf("verify locked dependency %s: %w", key, err)
+			return fmt.Errorf("locked ref %s for %s could not be resolved (missing or inaccessible): %w", pin.Ref, pin.NWO, err)
 		}
-		if isExactVersion(pin.Ref) && old.Commit != "sha1-"+sha {
-			return fmt.Errorf("tag %s for %s moved from %s to %s", pin.Ref, pin.NWO, strings.TrimPrefix(old.Commit, "sha1-"), sha)
+		locked := strings.TrimPrefix(old.Commit, "sha1-")
+		switch action.ClassifyRef(pin.Ref) {
+		case action.ExactSemanticVersionRef:
+			if !strings.EqualFold(locked, sha) {
+				return fmt.Errorf("tag %s for %s moved from %s to %s", pin.Ref, pin.NWO, locked, sha)
+			}
+		case action.CommitRef:
+			if !strings.EqualFold(locked, sha) {
+				return fmt.Errorf("locked commit %s for %s does not match commit ref %s", locked, pin.NWO, pin.Ref)
+			}
+		case action.FloatingRef, action.OtherRef:
+			if !strings.EqualFold(locked, sha) {
+				if err := api.VerifyReachable(ctx, pin.NWO, locked, sha); err != nil {
+					return fmt.Errorf("verify locked dependency %s: %w", key, err)
+				}
+			}
 		}
 	}
 	return nil
@@ -103,11 +120,14 @@ func (b *Builder) Visit(ctx context.Context, ref action.Reference) (string, erro
 			return "", fmt.Errorf("repository identity changed for %s: locked owner_id %d repo_id %d, current owner_id %d repo_id %d", ref.RepositoryID(), old.OwnerID, old.RepoID, id.OwnerID, id.RepoID)
 		}
 		oldSHA := strings.TrimPrefix(old.Commit, "sha1-")
-		if oldSHA != sha {
-			if isExactVersion(ref.Ref) {
+		if !strings.EqualFold(oldSHA, sha) {
+			if action.ClassifyRef(ref.Ref) == action.ExactSemanticVersionRef {
 				return "", fmt.Errorf("tag %s for %s moved from %s to %s", ref.Ref, ref.RepositoryID(), oldSHA, sha)
 			}
-			if !action.IsSHA(ref.Ref) {
+			if action.ClassifyRef(ref.Ref) != action.CommitRef {
+				if err := b.API.VerifyReachable(ctx, ref.RepositoryID(), oldSHA, sha); err != nil {
+					return "", fmt.Errorf("verify %s: %w", key, err)
+				}
 				b.Warnings = append(b.Warnings, fmt.Sprintf("floating reference %s moved from %s to %s; retaining locked commit", key, oldSHA, sha))
 				sha = oldSHA
 			}
@@ -160,7 +180,6 @@ func (b *Builder) Visit(ctx context.Context, ref action.Reference) (string, erro
 	b.state[traversal] = 2
 	return key, nil
 }
-func isExactVersion(ref string) bool { return action.IsVersionAnnotation(ref) }
 func union(a, b []string) []string {
 	set := map[string]struct{}{}
 	for _, x := range a {

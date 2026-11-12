@@ -28,6 +28,16 @@ import (
 // Reference identifies an external GitHub Action or reusable workflow.
 type Kind uint8
 
+// RefKind describes the security semantics of a GitHub ref.
+type RefKind uint8
+
+const (
+	ExactSemanticVersionRef RefKind = iota
+	FloatingRef
+	CommitRef
+	OtherRef
+)
+
 const (
 	Action Kind = iota
 	ReusableWorkflow
@@ -107,6 +117,30 @@ func IsSHA(ref string) bool {
 		}
 	}
 	return true
+}
+
+// ClassifyRef centralizes the distinction between immutable version tags,
+// mutable version aliases, commit IDs, and other named refs.
+func ClassifyRef(ref string) RefKind {
+	if IsSHA(ref) {
+		return CommitRef
+	}
+	if IsVersionAnnotation(ref) {
+		return ExactSemanticVersionRef
+	}
+	parts := strings.Split(strings.TrimPrefix(ref, "v"), ".")
+	if len(parts) <= 2 && len(parts) > 0 {
+		allNumeric := true
+		for _, part := range parts {
+			if part == "" || strings.IndexFunc(part, func(r rune) bool { return r < '0' || r > '9' }) >= 0 {
+				allNumeric = false
+			}
+		}
+		if allNumeric {
+			return FloatingRef
+		}
+	}
+	return OtherRef
 }
 
 // IsVersionAnnotation reports whether comment contains only a concrete semantic
