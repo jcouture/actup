@@ -109,6 +109,8 @@ func TestFloatingRefRetainsExistingCommit(t *testing.T) {
 			fmt.Fprint(w, `{"id":9,"owner":{"id":1}}`)
 		case r.URL.Path == "/repos/org/a/git/ref/tags/v1":
 			fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, newSHA)
+		case r.URL.Path == "/repos/org/a/compare/"+oldSHA+"..."+newSHA:
+			fmt.Fprintf(w, `{"status":"ahead","base_commit":{"sha":%q},"head_commit":{"sha":%q}}`, oldSHA, newSHA)
 		case r.URL.Path == "/repos/org/a/contents/action.yml":
 			if r.URL.Query().Get("ref") != oldSHA {
 				http.Error(w, "used moved commit", 400)
@@ -128,5 +130,58 @@ func TestFloatingRefRetainsExistingCommit(t *testing.T) {
 	}
 	if b.Nodes["org/a@v1"].Commit != "sha1-"+oldSHA || len(b.Warnings) != 1 {
 		t.Fatalf("node=%#v warnings=%v", b.Nodes["org/a@v1"], b.Warnings)
+	}
+}
+
+func TestVerifyExistingUpstream(t *testing.T) {
+	const old = "0123456789abcdef0123456789abcdef01234567"
+	const tip = "abcdef0123456789abcdef0123456789abcdef01"
+	for _, tc := range []struct {
+		name, ref, status, want string
+		ownerID, repoID         int64
+		deleted                 bool
+	}{
+		{"exact current", "v1.2.3", "", "", 1, 9, false},
+		{"exact moved", "v1.2.3", "", "tag v1.2.3 for org/a moved", 1, 9, false},
+		{"floating reachable", "v1", "ahead", "", 1, 9, false},
+		{"floating diverged", "v1", "diverged", "not reachable", 1, 9, false},
+		{"branch reachable", "main", "ahead", "", 1, 9, false},
+		{"owner changed", "v1", "ahead", "owner_id", 2, 9, false},
+		{"repository changed", "v1", "ahead", "repo_id", 1, 10, false},
+		{"deleted ref", "v1.2.3", "", "GitHub API returned 404", 1, 9, true},
+		{"commit ref", old, "", "", 1, 9, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			resolved := tip
+			if tc.name == "exact current" {
+				resolved = old
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch {
+				case r.URL.Path == "/repos/org/a":
+					fmt.Fprintf(w, `{"id":%d,"owner":{"id":%d}}`, tc.repoID, tc.ownerID)
+				case r.URL.Path == "/repos/org/a/git/commits/"+old:
+					fmt.Fprintf(w, `{"sha":%q}`, old)
+				case r.URL.Path == "/repos/org/a/git/ref/tags/"+tc.ref && !tc.deleted:
+					fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, resolved)
+				case r.URL.Path == "/repos/org/a/git/ref/heads/main":
+					fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, resolved)
+				case r.URL.Path == "/repos/org/a/compare/"+old+"..."+tip:
+					fmt.Fprintf(w, `{"status":%q,"base_commit":{"sha":%q},"head_commit":{"sha":%q}}`, tc.status, old, tip)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			defer server.Close()
+			key := "org/a@" + tc.ref
+			existing := lockfile.File{Dependencies: map[string]lockfile.Action{key: {Ref: tc.ref, Commit: "sha1-" + old, OwnerID: 1, RepoID: 9}}}
+			err := VerifyExisting(context.Background(), github.NewClient(github.ClientConfig{BaseURL: server.URL}), existing)
+			if tc.want == "" && err != nil {
+				t.Fatal(err)
+			}
+			if tc.want != "" && (err == nil || !strings.Contains(err.Error(), tc.want)) {
+				t.Fatalf("error = %v, want %q", err, tc.want)
+			}
+		})
 	}
 }

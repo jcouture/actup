@@ -55,6 +55,10 @@ func fixtureServer(t *testing.T, failCache bool) *httptest.Server {
 			fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, sha)
 		case p == "/repos/actions/cache/git/ref/tags/v3":
 			fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, cacheSHA)
+		case p == "/repos/foo/build/git/commits/"+sha:
+			fmt.Fprintf(w, `{"sha":%q}`, sha)
+		case p == "/repos/actions/cache/git/commits/"+cacheSHA:
+			fmt.Fprintf(w, `{"sha":%q}`, cacheSHA)
 		case p == "/repos/foo/build/contents/action.yml":
 			if r.URL.Query().Get("ref") != sha {
 				http.Error(w, "wrong commit", 400)
@@ -210,18 +214,19 @@ func TestUsage(t *testing.T) {
 
 func TestSecurityRejectsIdentityReplacementAndMovedTag(t *testing.T) {
 	for _, tc := range []struct {
-		name, commit string
-		repoID       int64
-		want         string
+		name, commit    string
+		ownerID, repoID int64
+		want            string
 	}{
-		{"identity", sha, 999, "repository identity changed"},
-		{"moved tag", cacheSHA, 11, "tag v2.0.0 for foo/build moved"},
+		{"repository identity", sha, 10, 999, "repository identity changed"},
+		{"owner identity", sha, 999, 11, "repository identity changed"},
+		{"moved tag", cacheSHA, 10, 11, "tag v2.0.0 for foo/build moved"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			root, file := setup(t, true, "jobs:\n  build:\n    steps:\n      - uses: foo/build@v2.0.0\n")
 			useServer(t, fixtureServer(t, false))
 			lockPath := filepath.Join(root, ".github", "workflows", "actions.lock")
-			body := fmt.Sprintf("version: v0.0.3\nworkflows:\n  .github/workflows/ci.yml:\n    - foo/build@v2.0.0\ndependencies:\n  foo/build@v2.0.0:\n    ref: v2.0.0\n    commit: sha1-%s\n    owner_id: 10\n    repo_id: %d\n", tc.commit, tc.repoID)
+			body := fmt.Sprintf("version: v0.0.3\nworkflows:\n  .github/workflows/ci.yml:\n    - foo/build@v2.0.0\ndependencies:\n  foo/build@v2.0.0:\n    ref: v2.0.0\n    commit: sha1-%s\n    owner_id: %d\n    repo_id: %d\n", tc.commit, tc.ownerID, tc.repoID)
 			if err := os.WriteFile(lockPath, []byte(body), 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -234,6 +239,79 @@ func TestSecurityRejectsIdentityReplacementAndMovedTag(t *testing.T) {
 			lockAfter, _ := os.ReadFile(lockPath)
 			if !bytes.Equal(before, after) || string(lockAfter) != body {
 				t.Fatal("security error changed files")
+			}
+		})
+	}
+}
+
+func TestDeletedLockedRefAndDynamicUsesDoNotWrite(t *testing.T) {
+	for _, tc := range []struct{ name, workflow, lock, want string }{
+		{"deleted ref", "jobs:\n  build:\n    steps:\n      - uses: foo/build@v2.0.0\n", "version: v0.0.3\nworkflows:\n  .github/workflows/ci.yml:\n    - foo/build@v9.9.9\ndependencies:\n  foo/build@v9.9.9:\n    ref: v9.9.9\n    commit: sha1-" + sha + "\n    owner_id: 10\n    repo_id: 11\n", "locked ref v9.9.9 for foo/build"},
+		{"dynamic uses", "jobs:\n  build:\n    steps:\n      - uses: ${{ matrix.action }}\n", "version: v0.0.3\nworkflows:\n  .github/workflows/ci.yml: []\ndependencies: {}\n", "prevents complete lockfile coverage"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root, file := setup(t, true, tc.workflow)
+			useServer(t, fixtureServer(t, false))
+			lockPath := filepath.Join(root, ".github", "workflows", "actions.lock")
+			if err := os.WriteFile(lockPath, []byte(tc.lock), 0644); err != nil {
+				t.Fatal(err)
+			}
+			for _, args := range [][]string{nil, {"--check"}, {"--dry-run"}} {
+				_, err := run(t, root, args...)
+				if err == nil || !strings.Contains(err.Error(), tc.want) || ExitCode(err) != 2 {
+					t.Fatalf("args=%v error=%v", args, err)
+				}
+				workflow, _ := os.ReadFile(file)
+				locked, _ := os.ReadFile(lockPath)
+				if string(workflow) != tc.workflow || string(locked) != tc.lock {
+					t.Fatal("verification failure wrote files")
+				}
+			}
+		})
+	}
+}
+
+func TestCheckRetainsReachableFloatingCommit(t *testing.T) {
+	for _, tc := range []struct {
+		status string
+		code   int
+	}{{"ahead", 0}, {"diverged", 2}} {
+		t.Run(tc.status, func(t *testing.T) {
+			root, file := setup(t, true, "jobs:\n  build:\n    steps:\n      - uses: foo/build@v1\n")
+			lockPath := filepath.Join(root, ".github", "workflows", "actions.lock")
+			locked := "version: v0.0.3\nworkflows:\n  .github/workflows/ci.yml:\n    - foo/build@v1\ndependencies:\n  foo/build@v1:\n    ref: v1\n    commit: sha1-" + sha + "\n    owner_id: 10\n    repo_id: 11\n"
+			if err := os.WriteFile(lockPath, []byte(locked), 0644); err != nil {
+				t.Fatal(err)
+			}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/foo/build":
+					fmt.Fprint(w, `{"id":11,"owner":{"id":10}}`)
+				case "/repos/foo/build/releases":
+					fmt.Fprint(w, `[{"tag_name":"v1.0.0","published_at":"2020-01-01T00:00:00Z"}]`)
+				case "/repos/foo/build/git/ref/tags/v1", "/repos/foo/build/git/ref/tags/v1.0.0":
+					fmt.Fprintf(w, `{"object":{"type":"commit","sha":%q}}`, cacheSHA)
+				case "/repos/foo/build/compare/" + sha + "..." + cacheSHA:
+					fmt.Fprintf(w, `{"status":%q,"base_commit":{"sha":%q},"head_commit":{"sha":%q}}`, tc.status, sha, cacheSHA)
+				case "/repos/foo/build/contents/action.yml":
+					if r.URL.Query().Get("ref") != sha {
+						t.Errorf("metadata fetched from %s", r.URL.Query().Get("ref"))
+					}
+					fmt.Fprint(w, `{"encoding":"base64","content":"cnVuczoKICB1c2luZzogbm9kZTIwCg=="}`)
+				default:
+					http.NotFound(w, r)
+				}
+			}))
+			t.Cleanup(server.Close)
+			useServer(t, server)
+			_, err := run(t, root, "--check")
+			if tc.code == 0 && err != nil || tc.code != 0 && ExitCode(err) != tc.code {
+				t.Fatalf("check error=%v", err)
+			}
+			workflow, _ := os.ReadFile(file)
+			lockAfter, _ := os.ReadFile(lockPath)
+			if string(workflow) != "jobs:\n  build:\n    steps:\n      - uses: foo/build@v1\n" || string(lockAfter) != locked {
+				t.Fatal("check changed files")
 			}
 		})
 	}

@@ -38,7 +38,7 @@ actup --config <path>
 actup --version
 ```
 
-`--check` writes nothing and exits 0 if current, 1 if source or lockfile changes are needed, and 2 for errors. `--dry-run` performs the analysis and reports changes without writing. Normal mode prepares the complete graph before writing files and restores prior file contents if a later write fails.
+`--check` writes nothing and exits 0 only when source, lockfile graph, repository identities, refs, and locked commits are current and verified. It exits 1 for normal source or lockfile updates, and 2 for verification, security, or operational errors. `--dry-run` performs the same analysis and reports direct updates, major-version warnings, reusable-workflow pin changes, and lockfile additions, removals, and graph changes without writing. Normal mode prepares the complete graph before writing files and restores prior file contents if a later write fails.
 
 ## Configuration and authentication
 
@@ -54,6 +54,6 @@ Set `GITHUB_TOKEN` for authenticated API access. It is optional for public repos
 
 ## Security behavior
 
-Actup stops if an existing lockfile's repository owner or repository ID changes, or if an exact semantic version tag moves to another commit. It does not write a partial graph or claim dynamic expressions are locked. Existing floating refs retain their locked commit when the upstream ref moves, with a warning. GitHub API lookups by the retained commit are required to succeed. Actup does not prove that a retained commit remains reachable from its floating ref; this API-only verification is a current limitation.
+Actup verifies every locked dependency's `owner_id` and `repo_id` against GitHub, checks that its ref still exists, and treats a moved exact semantic-version tag as a security error. Full commit refs are checked for existence and must match their locked commit. For floating refs such as `v5` or `main`, Actup retains the locked commit when the ref advances only if GitHub's commit comparison confirms that commit is still an ancestor of the current tip. A diverged or unverifiable comparison is an error; Actup never silently advances the lock. Actup does not write a partial graph or claim dynamic expressions are locked.
 
 Workflow edits preserve every byte outside dependency references and Actup-owned version comments. Actup does not use GitHub CLI, Node.js, Git subprocesses, or any other dependency manager.

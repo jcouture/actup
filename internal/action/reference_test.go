@@ -134,3 +134,23 @@ func TestIsVersionAnnotation(t *testing.T) {
 		}
 	}
 }
+
+func TestClassifyRef(t *testing.T) {
+	for _, tc := range []struct {
+		ref  string
+		kind RefKind
+	}{
+		{"v5.0.0", ExactSemanticVersionRef},
+		{"5.0.0", ExactSemanticVersionRef},
+		{"v5", FloatingRef},
+		{"v5.0", FloatingRef},
+		{"main", OtherRef},
+		{"release", OtherRef},
+		{"v5.0.0-beta", OtherRef},
+		{"0123456789abcdef0123456789abcdef01234567", CommitRef},
+	} {
+		if got := ClassifyRef(tc.ref); got != tc.kind {
+			t.Errorf("ClassifyRef(%q) = %v, want %v", tc.ref, got, tc.kind)
+		}
+	}
+}

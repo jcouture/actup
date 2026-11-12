@@ -84,7 +84,11 @@ func (client *Client) ResolveRef(ctx context.Context, repository, ref string) (s
 
 func (client *Client) resolveRef(ctx context.Context, repository, ref string) (string, error) {
 	if action.IsSHA(ref) {
-		return strings.ToLower(ref), nil
+		sha := strings.ToLower(ref)
+		if err := client.VerifyCommit(ctx, repository, sha); err != nil {
+			return "", err
+		}
+		return sha, nil
 	}
 	owner, name, err := repositoryParts(repository)
 	if err != nil {
@@ -113,6 +117,13 @@ func (client *Client) resolveRef(ctx context.Context, repository, ref string) (s
 }
 
 func (client *Client) ActionMetadata(ctx context.Context, repository, subpath, sha string) ([]byte, error) {
+	cacheKey := strings.ToLower(repository) + "/" + subpath + "@" + strings.ToLower(sha)
+	client.mu.Lock()
+	if cached, ok := client.metadata[cacheKey]; ok {
+		client.mu.Unlock()
+		return append([]byte(nil), cached...), nil
+	}
+	client.mu.Unlock()
 	owner, name, err := repositoryParts(repository)
 	if err != nil {
 		return nil, err
@@ -144,9 +155,79 @@ func (client *Client) ActionMetadata(ctx context.Context, repository, subpath, s
 		if len(decoded) > 1<<20 {
 			return nil, fmt.Errorf("action metadata %s/%s too large", repository, path)
 		}
+		client.mu.Lock()
+		client.metadata[cacheKey] = append([]byte(nil), decoded...)
+		client.mu.Unlock()
 		return decoded, nil
 	}
 	return nil, fmt.Errorf("action metadata not found for %s/%s at %s", repository, subpath, sha)
+}
+
+// VerifyCommit confirms that GitHub still has this exact commit in the named repository.
+func (client *Client) VerifyCommit(ctx context.Context, repository, sha string) error {
+	key := strings.ToLower(repository) + "@" + strings.ToLower(sha)
+	client.mu.Lock()
+	ok := client.commits[key]
+	client.mu.Unlock()
+	if ok {
+		return nil
+	}
+	owner, name, err := repositoryParts(repository)
+	if err != nil {
+		return err
+	}
+	var commit struct {
+		SHA string `json:"sha"`
+	}
+	if err := client.get(ctx, fmt.Sprintf("/repos/%s/%s/git/commits/%s", owner, name, url.PathEscape(sha)), &commit); err != nil {
+		return fmt.Errorf("verify commit %s for %s: %w", sha, repository, err)
+	}
+	if !strings.EqualFold(commit.SHA, sha) {
+		return fmt.Errorf("verify commit %s for %s: GitHub returned %q", sha, repository, commit.SHA)
+	}
+	client.mu.Lock()
+	client.commits[key] = true
+	client.mu.Unlock()
+	return nil
+}
+
+// VerifyReachable checks ancestry using GitHub's compare endpoint. Only
+// identical and ahead mean the locked commit is reachable from the current tip.
+func (client *Client) VerifyReachable(ctx context.Context, repository, locked, tip string) error {
+	key := strings.ToLower(repository) + "@" + strings.ToLower(locked) + "..." + strings.ToLower(tip)
+	client.mu.Lock()
+	ok := client.reachable[key]
+	client.mu.Unlock()
+	if ok {
+		return nil
+	}
+	owner, name, err := repositoryParts(repository)
+	if err != nil {
+		return err
+	}
+	var comparison struct {
+		Status     string `json:"status"`
+		BaseCommit struct {
+			SHA string `json:"sha"`
+		} `json:"base_commit"`
+		HeadCommit struct {
+			SHA string `json:"sha"`
+		} `json:"head_commit"`
+	}
+	endpoint := fmt.Sprintf("/repos/%s/%s/compare/%s...%s", owner, name, url.PathEscape(locked), url.PathEscape(tip))
+	if err := client.get(ctx, endpoint, &comparison); err != nil {
+		return fmt.Errorf("compare locked commit %s with current tip %s for %s: %w", locked, tip, repository, err)
+	}
+	if !strings.EqualFold(comparison.BaseCommit.SHA, locked) || !strings.EqualFold(comparison.HeadCommit.SHA, tip) {
+		return fmt.Errorf("compare %s: GitHub returned unexpected commit identities", repository)
+	}
+	if comparison.Status != "ahead" && comparison.Status != "identical" {
+		return fmt.Errorf("locked commit %s is not reachable from current ref tip %s for %s (comparison: %s)", locked, tip, repository, comparison.Status)
+	}
+	client.mu.Lock()
+	client.reachable[key] = true
+	client.mu.Unlock()
+	return nil
 }
 func escapedSegments(path string) []string {
 	parts := strings.Split(path, "/")

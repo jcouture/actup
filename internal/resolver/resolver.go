@@ -110,6 +110,14 @@ func (r *Resolver) Resolve(ctx context.Context, occurrences []Occurrence, age ti
 		changed := !action.IsSHA(ref) || !strings.EqualFold(ref, target.SHA)
 		if lockfile && o.Use.Reference.Kind == action.Action {
 			changed = ref != target.Tag && !(action.IsSHA(ref) && strings.EqualFold(ref, target.SHA) && current == target.Tag)
+			refKind := action.ClassifyRef(ref)
+			if changed && ((refKind == action.FloatingRef && known && oldMajor == target.Major) || refKind == action.OtherRef) {
+				resolved, err := r.client.ResolveRef(ctx, o.Use.Reference.RepositoryID(), ref)
+				if err != nil {
+					return nil, err
+				}
+				changed = !strings.EqualFold(resolved, target.SHA)
+			}
 		}
 		results = append(results, Result{Occurrence: o, Target: target, Current: current, Changed: changed, MajorChange: changed && known && oldMajor != target.Major})
 	}
